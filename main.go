@@ -2,63 +2,70 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math/big"
 	"math/bits"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
 // ----------------------------------------------------------------------------
-// Fibonacci Implementation (Simulating the 'fibonacci' package structure)
-// This section implements the core logic as defined by the SRS and RTM.
+// SECTION 1: DOMAIN LOGIC (Fibonacci Calculation Engine)
 // ----------------------------------------------------------------------------
 
 // --- Interface Definition ---
 
-// Calculator interface defines the contract for Fibonacci algorithms (RTM: REQ-15 Extensibility).
+// Calculator interface defines the contract for Fibonacci algorithms.
+// Refactoring: sync.Pool removed from the interface; it's an implementation detail.
 type Calculator interface {
-	Calculate(ctx context.Context, progressChan chan<- float64, n uint64, pool *sync.Pool) (*big.Int, error)
+	Calculate(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error)
 	Name() string
 }
 
-// --- Memory Management Utilities ---
+// --- Memory Management Utilities (Optimized) ---
 
-// calculationTemps centralizes intermediate variables used during calculation (RTM: REQ-06).
+// calculationTemps centralizes intermediate variables.
 type calculationTemps struct {
-	// t1, t2, t3 are temporary big.Int used within the loop iterations to avoid allocations.
 	t1, t2, t3 *big.Int
 }
 
-// getTemps retrieves a set of initialized temporary variables from the pool (RTM: REQ-05).
-func getTemps(pool *sync.Pool) *calculationTemps {
-	// RTM: REQ-04 (Support big.Int)
-	return &calculationTemps{
-		t1: pool.Get().(*big.Int),
-		t2: pool.Get().(*big.Int),
-		t3: pool.Get().(*big.Int),
-	}
+// Optimization: Pool the entire calculationTemps struct instead of individual big.Ints.
+// This reduces the number of allocations during calculation.
+var tempsPool = sync.Pool{
+	New: func() interface{} {
+		return &calculationTemps{
+			t1: new(big.Int),
+			t2: new(big.Int),
+			t3: new(big.Int),
+		}
+	},
 }
 
-// putTemps returns the temporary variables back to the pool for reuse (RTM: REQ-05).
-func putTemps(pool *sync.Pool, temps *calculationTemps) {
-	// Resetting (SetInt64(0)) ensures the objects are clean for the next usage,
-	// while retaining their internal memory allocation.
-	pool.Put(temps.t1.SetInt64(0))
-	pool.Put(temps.t2.SetInt64(0))
-	pool.Put(temps.t3.SetInt64(0))
+// getTemps retrieves a set of initialized temporary variables from the pool.
+func getTemps() *calculationTemps {
+	return tempsPool.Get().(*calculationTemps)
 }
 
-// reportProgress sends the progress value to the channel non-blockingly (RTM: REQ-09, REQ-11).
+// putTemps returns the temporary variables back to the pool for reuse.
+func putTemps(temps *calculationTemps) {
+	// Optimization: We do not explicitly reset the big.Ints (SetInt64(0)).
+	// Since Calculate always overwrites the destination (t1, t2, t3) before reading,
+	// resetting is unnecessary overhead and allows retaining the internal memory allocation.
+	tempsPool.Put(temps)
+}
+
+// reportProgress sends the progress value to the channel non-blockingly.
 func reportProgress(progressChan chan<- float64, progress float64) {
 	if progressChan == nil {
 		return
 	}
-	// Use select with default to ensure the calculation is never blocked by the UI/reporting.
 	select {
 	case progressChan <- progress:
 	default:
@@ -68,245 +75,257 @@ func reportProgress(progressChan chan<- float64, progress float64) {
 
 // --- Fast Doubling Implementation ---
 
-// FastDoubling implements the Calculator interface.
 type FastDoubling struct{}
 
 func (fd *FastDoubling) Name() string {
 	return "FastDoubling"
 }
 
-// Calculate computes the nth Fibonacci number using the Fast Doubling algorithm.
-// (RTM: REQ-01 Algorithm, REQ-02 O(log n) complexity).
-func (fd *FastDoubling) Calculate(ctx context.Context, progressChan chan<- float64, n uint64, pool *sync.Pool) (*big.Int, error) {
+// Calculate computes the nth Fibonacci number using the Fast Doubling algorithm (O(log n)).
+func (fd *FastDoubling) Calculate(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error) {
 
-	// RTM: REQ-03 - Handle base cases explicitly.
+	// Handle base cases.
 	if n == 0 {
 		reportProgress(progressChan, 1.0)
 		return big.NewInt(0), nil
 	}
-	if n == 1 {
+	if n <= 2 { // Optimization: Handle n=1 and n=2 quickly.
 		reportProgress(progressChan, 1.0)
 		return big.NewInt(1), nil
 	}
 
-	// Setup memory management.
-	temps := getTemps(pool)
-	defer putTemps(pool, temps)
+	// Setup memory management using the optimized pool.
+	temps := getTemps()
+	defer putTemps(temps)
 
-	// Initialize the state (k=0): F(0)=0, F(1)=1.
-	// We use explicit naming (RTM: REQ-13).
-	// f_k represents F(k)
-	// f_k1 represents F(k+1)
-	f_k := big.NewInt(0)
-	f_k1 := big.NewInt(1)
+	// Initialize the state: F(0)=0, F(1)=1.
+	f_k := big.NewInt(0)  // F(k)
+	f_k1 := big.NewInt(1) // F(k+1)
 
-	// Determine the number of bits in n.
 	numBits := bits.Len64(n)
+	// Optimization: Pre-calculate the inverse to use multiplication (faster) instead of division in the loop.
+	invNumBits := 1.0 / float64(numBits)
 
-	// Iterate through the bits of n from most significant (MSB) to least significant (LSB).
-	// RTM: REQ-14 - Comment explaining the binary approach.
-	// We iterate from i = numBits - 1 down to 0.
+	// Iterate from MSB to LSB.
 	for i := numBits - 1; i >= 0; i-- {
 
-		// RTM: REQ-07 - Check for cancellation signal from the context periodically.
+		// Check for cancellation signal periodically.
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("calculation canceled: %w", ctx.Err())
 		default:
 			// Proceed with calculation.
 		}
 
-		// RTM: REQ-10 - Calculate progression based on bits traversed.
-		if i < numBits-1 {
-			// Progress is the ratio of bits processed so far.
-			progress := float64(numBits-1-i) / float64(numBits)
+		// Calculate progression.
+		if progressChan != nil && i < numBits-1 {
+			progress := float64(numBits-1-i) * invNumBits
 			reportProgress(progressChan, progress)
 		}
 
 		// --- Doubling Step (k -> 2k) ---
-		// Calculate F(2k) and F(2k+1) based on F(k) and F(k+1).
 
-		// RTM: REQ-14 - Comment explaining the formulas.
+		// 1. F(2k) = F(k) * [2*F(k+1) - F(k)]
+		temps.t1.Lsh(f_k1, 1)       // t1 = 2 * F(k+1)
+		temps.t2.Sub(temps.t1, f_k) // t2 = [2*F(k+1) - F(k)]
+		temps.t3.Mul(f_k, temps.t2) // t3 = F(2k)
 
-		// 1. Calculate F(2k) = F(k) * [2*F(k+1) - F(k)]
+		// 2. F(2k+1) = F(k+1)^2 + F(k)^2
+		temps.t1.Mul(f_k1, f_k1)     // t1 = F(k+1)^2
+		temps.t2.Mul(f_k, f_k)       // t2 = F(k)^2
+		f_k1.Add(temps.t1, temps.t2) // F(2k+1)
 
-		// t1 = 2 * F(k+1)
-		temps.t1.Lsh(f_k1, 1) // Efficient multiplication by 2 (Left shift).
-		// t2 = [2*F(k+1) - F(k)]
-		temps.t2.Sub(temps.t1, f_k)
-		// F(2k) (stored temporarily in t3) = F(k) * t2
-		temps.t3.Mul(f_k, temps.t2)
-
-		// 2. Calculate F(2k+1) = F(k+1)^2 + F(k)^2
-
-		// t1 = F(k+1)^2
-		temps.t1.Mul(f_k1, f_k1)
-		// t2 = F(k)^2
-		temps.t2.Mul(f_k, f_k)
-		// F(2k+1) (new f_k1) = t1 + t2
-		f_k1.Add(temps.t1, temps.t2)
-
-		// Update F(2k) (moved from t3 to f_k)
-		f_k.Set(temps.t3)
+		f_k.Set(temps.t3) // Update F(k) to F(2k)
 
 		// --- Addition Step (k -> k+1 if necessary) ---
-		// If the current bit of n at position i is 1, we advance the state by one.
 		if (n>>uint(i))&1 == 1 {
-			// (F(k'), F(k'+1)) becomes (F(k'+1), F(k'+2))
-			// where k' is the previously calculated 2k.
-			// F(k'+2) = F(k'+1) + F(k')
-
-			// t1 (new F(k)) = current F(k+1)
 			temps.t1.Set(f_k1)
-			// new F(k+1) = current F(k+1) + current F(k)
 			f_k1.Add(f_k1, f_k)
-			// f_k = t1
 			f_k.Set(temps.t1)
 		}
 	}
 
 	reportProgress(progressChan, 1.0)
-	// After iterating through all bits, f_k holds F(n).
 	return f_k, nil
 }
 
 // ----------------------------------------------------------------------------
-// Main Function (Entry Point and CLI Application)
-// This section demonstrates how to use the Fibonacci implementation.
+// SECTION 2: APPLICATION LOGIC (CLI Interface)
 // ----------------------------------------------------------------------------
 
-// Initialize the global pool for big.Int reuse (RTM: REQ-05).
-// This ensures thread-safe access to the pool (RTM: REQ-08).
-var bigIntPool = sync.Pool{
-	New: func() interface{} {
-		return new(big.Int)
-	},
+// Define exit codes.
+const (
+	ExitSuccess       = 0
+	ExitErrorGeneric  = 1
+	ExitErrorTimeout  = 2
+	ExitErrorCanceled = 130 // Standard code for Ctrl+C
+)
+
+// AppConfig centralizes the configuration.
+type AppConfig struct {
+	N       uint64
+	Verbose bool
+	Timeout time.Duration
 }
 
 func main() {
 	// 1. Configuration des arguments CLI
-	nFlag := flag.Uint64("n", 1000, "L'indice 'n' de la séquence de Fibonacci à calculer.")
-	verboseFlag := flag.Bool("v", false, "Affiche le résultat complet (peut être très long).")
+	// We define flags here. flag.Parse() must occur before use.
+	nFlag := flag.Uint64("n", 100000000, "L'indice 'n' de la séquence de Fibonacci à calculer.")
+	verboseFlag := flag.Bool("v", false, "Affiche le résultat complet.")
 	timeoutFlag := flag.Duration("timeout", 5*time.Minute, "Délai maximum pour le calcul (ex: 30s, 1m).")
 	flag.Parse()
 
-	n := *nFlag
-	fmt.Printf("Calcul de F(%d) avec l'algorithme Fast Doubling...\n", n)
-	fmt.Printf("Timeout défini à %s.\n", *timeoutFlag)
+	config := AppConfig{
+		N:       *nFlag,
+		Verbose: *verboseFlag,
+		Timeout: *timeoutFlag,
+	}
 
-	// 2. Sélection de la Stratégie
+	// 2. Execution de l'application (Refactoring: main calls run)
+	// We pass os.Stdout for dependency injection, enabling testing.
+	exitCode := run(context.Background(), config, os.Stdout)
+	os.Exit(exitCode)
+}
+
+// run orchestrates the application logic. Separated from main() for testability.
+func run(ctx context.Context, config AppConfig, out io.Writer) int {
+	fmt.Fprintf(out, "Calcul de F(%d) avec l'algorithme Fast Doubling...\n", config.N)
+	fmt.Fprintf(out, "Timeout défini à %s.\n", config.Timeout)
+
+	// 1. Sélection de la Stratégie
 	var calculator Calculator = &FastDoubling{}
 
-	// 3. Configuration du Contexte et de l'Annulation (RTM: REQ-07)
-	// 3a. Contexte avec Timeout
-	ctx, cancelTimeout := context.WithTimeout(context.Background(), *timeoutFlag)
+	// 2. Configuration du Contexte et de l'Annulation
+	ctx, cancelTimeout := context.WithTimeout(ctx, config.Timeout)
 	defer cancelTimeout()
 
-	// 3b. Contexte avec gestion des signaux (Ctrl+C)
-	// Ce contexte hérite du timeout précédent et ajoute la gestion des signaux.
+	// Gestion des signaux (Ctrl+C)
 	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
-	// 4. Configuration du Reporting de Progression (RTM: REQ-09)
-	// Canal bufferisé pour gérer les mises à jour rapides sans bloquer le calcul.
+	// 3. Configuration du Reporting de Progression
 	progressChan := make(chan float64, 100)
 	var wg sync.WaitGroup
 
-	// Lancement d'une goroutine dédiée à l'affichage de la progression.
 	wg.Add(1)
-	go displayProgress(&wg, progressChan)
+	go displayProgress(&wg, progressChan, out)
 
-	// 5. Exécution du Calcul
+	// 4. Exécution du Calcul
 	startTime := time.Now()
-	result, err := calculator.Calculate(ctx, progressChan, n, &bigIntPool)
+	// The pool is now managed internally by the Calculator implementation.
+	result, err := calculator.Calculate(ctx, progressChan, config.N)
 
-	// Fermeture du canal de progression une fois le calcul terminé (ou annulé).
+	// Signal completion and wait for the progress display.
 	close(progressChan)
-	// Attente que l'affichage de la progression soit terminé.
 	wg.Wait()
 
 	duration := time.Since(startTime)
 
-	// 6. Gestion des Résultats et Erreurs
-	fmt.Println("\n--- Résultats ---")
+	// 5. Gestion des Résultats et Erreurs
+	fmt.Fprintln(out, "\n--- Résultats ---")
 	if err != nil {
-		// Vérification de la cause de l'erreur via le contexte.
-		switch ctx.Err() {
-		case context.DeadlineExceeded:
-			fmt.Printf("Statut : Échec. Le calcul a dépassé le délai imparti (%s) après %s.\n", *timeoutFlag, duration)
-			os.Exit(2)
-		case context.Canceled:
-			fmt.Printf("Statut : Annulé par l'utilisateur (Ctrl+C) après %s.\n", duration)
-			os.Exit(130) // Code d'erreur standard pour Ctrl+C
-		default:
-			fmt.Printf("Statut : Échec. Erreur interne : %v\n", err)
-			os.Exit(1)
-		}
+		return handleCalculationError(err, duration, config.Timeout, out)
 	}
 
-	// 7. Affichage du Résultat
-	fmt.Printf("Statut : Succès\n")
-	fmt.Printf("Durée d'exécution : %s\n", duration)
-	fmt.Printf("Taille du résultat : %d bits.\n", result.BitLen())
+	// 6. Affichage du Résultat
+	displayResult(result, config.N, duration, config.Verbose, out)
+	return ExitSuccess
+}
 
-	resultStr := result.String()
-	fmt.Printf("Nombre de chiffres décimaux : %d\n", len(resultStr))
-
-	if *verboseFlag {
-		fmt.Printf("F(%d) = %s\n", n, resultStr)
-	} else if len(resultStr) > 50 {
-		// Affichage tronqué pour les grands nombres.
-		fmt.Printf("F(%d) (tronqué) = %s...%s\n", n, resultStr[:20], resultStr[len(resultStr)-20:])
+// handleCalculationError determines the cause of the error and reports it.
+func handleCalculationError(err error, duration time.Duration, timeout time.Duration, out io.Writer) int {
+	// Refactoring: Use errors.Is for robust error checking.
+	if errors.Is(err, context.DeadlineExceeded) {
+		fmt.Fprintf(out, "Statut : Échec. Le calcul a dépassé le délai imparti (%s) après %s.\n", timeout, duration)
+		return ExitErrorTimeout
+	} else if errors.Is(err, context.Canceled) {
+		fmt.Fprintf(out, "Statut : Annulé (signal reçu ou Ctrl+C) après %s.\n", duration)
+		return ExitErrorCanceled
 	} else {
-		fmt.Printf("F(%d) = %s\n", n, resultStr)
+		fmt.Fprintf(out, "Statut : Échec. Erreur interne : %v\n", err)
+		return ExitErrorGeneric
 	}
 }
 
-// displayProgress lit le canal de progression et met à jour l'affichage périodiquement.
-func displayProgress(wg *sync.WaitGroup, progressChan <-chan float64) {
+// displayResult formats and prints the final calculation result.
+func displayResult(result *big.Int, n uint64, duration time.Duration, verbose bool, out io.Writer) {
+	fmt.Fprintf(out, "Statut : Succès\n")
+	fmt.Fprintf(out, "Durée d'exécution : %s\n", duration)
+	fmt.Fprintf(out, "Taille du résultat : %d bits.\n", result.BitLen())
+
+	resultStr := result.String()
+	numDigits := len(resultStr)
+	fmt.Fprintf(out, "Nombre de chiffres décimaux : %d\n", numDigits)
+
+	const truncationLimit = 50
+	const displayEdges = 20
+
+	if verbose {
+		fmt.Fprintf(out, "F(%d) = %s\n", n, resultStr)
+	} else if numDigits > truncationLimit {
+		// Affichage tronqué
+		fmt.Fprintf(out, "F(%d) (tronqué) = %s...%s\n", n, resultStr[:displayEdges], resultStr[numDigits-displayEdges:])
+	} else {
+		fmt.Fprintf(out, "F(%d) = %s\n", n, resultStr)
+	}
+}
+
+// displayProgress reads the progress channel and updates the display periodically.
+func displayProgress(wg *sync.WaitGroup, progressChan <-chan float64, out io.Writer) {
 	defer wg.Done()
-	// Utilisation d'un ticker pour limiter le taux de rafraîchissement de l'affichage.
+	// Ticker (100ms = 10Hz) to limit refresh rate.
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	lastProgress := 0.0
-	done := false
 
-	for !done {
+	// Helper function to print the current progress bar
+	printBar := func(progress float64) {
+		// \r (Carriage Return) moves the cursor to the beginning of the line.
+		fmt.Fprintf(out, "\rProgression : %6.2f%% [%-30s]", progress*100, progressBar(progress, 30))
+	}
+
+	for {
 		select {
 		case p, ok := <-progressChan:
 			if !ok {
-				// Le canal est fermé, le calcul est terminé.
-				lastProgress = 1.0
-				done = true
-			} else {
-				lastProgress = p
+				// Channel closed. Ensure 100% is displayed.
+				if lastProgress != 1.0 {
+					printBar(1.0)
+				}
+				fmt.Fprintln(out) // New line after the final progress bar.
+				return
 			}
+			lastProgress = p
 		case <-ticker.C:
-			// Mise à jour de l'affichage à intervalle régulier.
-			fmt.Printf("\rProgression : %6.2f%% [%-30s]", lastProgress*100, progressBar(lastProgress, 30))
+			// Update display at regular interval.
+			printBar(lastProgress)
 		}
 	}
-	// Affichage final à 100%.
-	fmt.Printf("\rProgression : 100.00%% [%-30s]\n", progressBar(1.0, 30))
 }
 
-// Fonction utilitaire pour la barre de progression CLI.
+// progressBar generates a CLI progress bar string.
+// Optimization: Using strings.Builder for efficient string construction.
 func progressBar(progress float64, length int) string {
+	// Clamping progress between 0.0 and 1.0
+	if progress > 1.0 {
+		progress = 1.0
+	} else if progress < 0.0 {
+		progress = 0.0
+	}
+
 	count := int(progress * float64(length))
-	if count > length {
-		count = length
-	}
-	if count < 0 {
-		count = 0
-	}
-	bar := make([]rune, length)
+
+	var builder strings.Builder
+	builder.Grow(length) // Pre-allocate capacity
+
 	for i := 0; i < length; i++ {
 		if i < count {
-			bar[i] = '■'
+			builder.WriteRune('■')
 		} else {
-			bar[i] = ' '
+			builder.WriteRune(' ')
 		}
 	}
-	return string(bar)
+	return builder.String()
 }
