@@ -286,7 +286,7 @@ type AppConfig struct {
 func main() {
 	// 1. Configuration de l'interface en ligne de commande (CLI).
 	// Le package `flag` permet de définir les arguments que l'utilisateur peut passer.
-	nFlag := flag.Uint64("n", 100000000, "L'indice 'n' de la séquence de Fibonacci à calculer.")
+	nFlag := flag.Uint64("n", 1000000000, "L'indice 'n' de la séquence de Fibonacci à calculer.")
 	verboseFlag := flag.Bool("v", false, "Affiche le résultat complet.")
 	timeoutFlag := flag.Duration("timeout", 5*time.Minute, "Délai maximum (ex: 30s, 1m).")
 	flag.Parse() // Analyse les arguments fournis par l'utilisateur.
