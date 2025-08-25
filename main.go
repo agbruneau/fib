@@ -5,9 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"image/color"
 	"io"
-	"log"
 	"math/big"
 	"math/bits"
 	"os"
@@ -17,10 +15,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"gonum.org/v1/plot"
-	"gonum.org/v1/plot/plotter"
-	"gonum.org/v1/plot/vg"
 )
 
 // ----------------------------------------------------------------------------
@@ -295,15 +289,7 @@ func main() {
 	nFlag := flag.Uint64("n", 100000000, "L'indice 'n' de la séquence de Fibonacci à calculer.")
 	verboseFlag := flag.Bool("v", false, "Affiche le résultat complet.")
 	timeoutFlag := flag.Duration("timeout", 5*time.Minute, "Délai maximum (ex: 30s, 1m).")
-	graphFlag := flag.String("graph", "", "Génère un graphique de performance et le sauvegarde dans le fichier spécifié (ex: 'performance.png').")
 	flag.Parse() // Analyse les arguments fournis par l'utilisateur.
-
-	// Si le drapeau -graph est utilisé, on génère le graphique et on quitte.
-	if *graphFlag != "" {
-		exitCode := generatePerformanceGraph(*graphFlag, os.Stdout)
-		os.Exit(exitCode)
-		return
-	}
 
 	// 2. Création de la configuration de l'application.
 	config := AppConfig{
@@ -470,66 +456,4 @@ func progressBar(progress float64, length int) string {
 		}
 	}
 	return builder.String()
-}
-
-// generatePerformanceGraph exécute des benchmarks et génère un graphique de performance.
-func generatePerformanceGraph(filename string, out io.Writer) int {
-	fmt.Fprintln(out, "Génération du graphique de performance...")
-
-	var calculator Calculator = &OptimizedFastDoubling{}
-	points := make(plotter.XYs, 0)
-
-	// Définir les valeurs de 'n' à tester. On utilise une échelle exponentielle
-	// pour bien visualiser la courbe de performance.
-	nValues := []uint64{
-		1, 10, 100, 1000, 10000, 100000, 500000,
-		1000000, 2000000, 5000000, 10000000,
-	}
-
-	totalSteps := len(nValues)
-	for i, n := range nValues {
-		fmt.Fprintf(out, "\rCalcul pour n = %-10d (%d/%d)...", n, i+1, totalSteps)
-
-		startTime := time.Now()
-		_, err := calculator.Calculate(context.Background(), nil, n)
-		duration := time.Since(startTime)
-
-		if err != nil {
-			fmt.Fprintf(out, "\nErreur lors du calcul pour n=%d: %v\n", n, err)
-			return ExitErrorGeneric
-		}
-
-		// Ajoute le point de données (n, temps en secondes) au jeu de données.
-		points = append(points, plotter.XY{X: float64(n), Y: duration.Seconds()})
-	}
-	fmt.Fprintln(out, "\nCalculs terminés.")
-
-	// Création du graphique
-	p := plot.New()
-
-	p.Title.Text = "Performance du calcul de Fibonacci"
-	p.X.Label.Text = "n (échelle logarithmique)"
-	p.Y.Label.Text = "Temps d'exécution (secondes)"
-	p.X.Scale = plot.LogScale{} // Utiliser une échelle logarithmique pour l'axe des X
-
-	// Ajout des points de données au graphique
-	line, err := plotter.NewLine(points)
-	if err != nil {
-		log.Printf("Erreur lors de la création de la ligne du graphique : %v", err)
-		return ExitErrorGeneric
-	}
-	line.LineStyle.Width = vg.Points(2)
-	line.LineStyle.Color = color.RGBA{R: 25, B: 150, A: 255}
-
-	p.Add(line)
-
-	// Sauvegarde du graphique dans un fichier PNG.
-	fmt.Fprintf(out, "Sauvegarde du graphique dans '%s'...\n", filename)
-	if err := p.Save(8*vg.Inch, 5*vg.Inch, filename); err != nil {
-		log.Printf("Erreur lors de la sauvegarde du graphique : %v", err)
-		return ExitErrorGeneric
-	}
-
-	fmt.Fprintln(out, "Graphique généré avec succès.")
-	return ExitSuccess
 }
