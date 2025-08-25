@@ -321,9 +321,7 @@ func displayProgress(wg *sync.WaitGroup, progressChan <-chan float64, out io.Wri
 		case p, ok := <-progressChan:
 			if !ok {
 				// Channel closed, ensure 100% is displayed.
-				if lastProgress != 1.0 {
-					printBar(1.0)
-				}
+				printBar(1.0)
 				fmt.Fprintln(out)
 				return
 			}
