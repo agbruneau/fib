@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -273,62 +274,27 @@ const (
 	ExitErrorCanceled = 130 // L'utilisateur a annulé l'opération (ex: Ctrl+C).
 )
 
-// Job représente une seule tâche à calculer.
-type Job struct {
-	N uint64
-}
-
-// Result contient le résultat d'une tâche terminée.
-type Result struct {
-	Job      Job
-	Value    *big.Int
-	Duration time.Duration
-	Err      error
-}
-
 // AppConfig regroupe les paramètres de configuration de l'application,
 // principalement issus des arguments de la ligne de commande.
 type AppConfig struct {
+	N       uint64        // L'indice 'n' du nombre de Fibonacci à calculer.
+	Verbose bool          // Si vrai, affiche le nombre complet sans le tronquer.
 	Timeout time.Duration // La durée maximale autorisée pour le calcul.
-}
-
-// worker est une goroutine qui lit les jobs du canal `jobs`, les exécute,
-// et envoie les résultats sur le canal `results`.
-func worker(ctx context.Context, wg *sync.WaitGroup, calculator Calculator, jobs <-chan Job, results chan<- Result) {
-	defer wg.Done()
-	for job := range jobs {
-		// Vérifie si le contexte a été annulé avant de démarrer un nouveau calcul.
-		select {
-		case <-ctx.Done():
-			// Le contexte est annulé, on ne commence pas de nouveaux jobs.
-			return
-		default:
-			// Continue l'exécution.
-		}
-
-		startTime := time.Now()
-		// Note : on passe un `nil` pour le canal de progression, car on ne l'utilise plus.
-		value, err := calculator.Calculate(ctx, nil, job.N)
-		duration := time.Since(startTime)
-
-		results <- Result{
-			Job:      job,
-			Value:    value,
-			Duration: duration,
-			Err:      err,
-		}
-	}
 }
 
 // main est le point d'entrée du programme.
 func main() {
 	// 1. Configuration de l'interface en ligne de commande (CLI).
 	// Le package `flag` permet de définir les arguments que l'utilisateur peut passer.
+	nFlag := flag.Uint64("n", 100000000, "L'indice 'n' de la séquence de Fibonacci à calculer.")
+	verboseFlag := flag.Bool("v", false, "Affiche le résultat complet.")
 	timeoutFlag := flag.Duration("timeout", 5*time.Minute, "Délai maximum (ex: 30s, 1m).")
 	flag.Parse() // Analyse les arguments fournis par l'utilisateur.
 
 	// 2. Création de la configuration de l'application.
 	config := AppConfig{
+		N:       *nFlag,
+		Verbose: *verboseFlag,
 		Timeout: *timeoutFlag,
 	}
 
@@ -343,100 +309,151 @@ func run(ctx context.Context, config AppConfig, out io.Writer) int {
 	// Instanciation du moteur de calcul.
 	var calculator Calculator = &OptimizedFastDoubling{}
 
-	// --- Configuration du pool de workers ---
-	// On inclut un nombre très grand pour que le timeout soit testable.
-	tasks := []uint64{0, 1, 10, 20, 40, 93, 94, 100, 500, 1000, 1000000}
-	numJobs := len(tasks)
-	jobs := make(chan Job, numJobs)
-	results := make(chan Result, numJobs)
-	numWorkers := runtime.NumCPU()
-
-	fmt.Fprintf(out, "Lancement de %d workers pour calculer F(n) pour %d tâches.\n", numWorkers, numJobs)
+	// Affichage des informations de départ.
+	fmt.Fprintf(out, "Calcul de F(%d)...\n", config.N)
 	fmt.Fprintf(out, "Algorithme : %s\n", calculator.Name())
-	fmt.Fprintf(out, "Timeout global défini à %s.\n", config.Timeout)
-	fmt.Fprintln(out, "---")
+	fmt.Fprintf(out, "Nombre de cœurs CPU disponibles : %d\n", runtime.NumCPU())
+	fmt.Fprintf(out, "Timeout défini à %s.\n", config.Timeout)
 
 	// --- Gestion du cycle de vie avec `context` ---
+	// `context` est un outil standard en Go pour gérer l'annulation, les délais
+	// et d'autres signaux à travers les différentes parties d'une application.
+	//
+	// 1. On crée un contexte avec un délai d'attente (timeout).
 	ctx, cancelTimeout := context.WithTimeout(ctx, config.Timeout)
-	defer cancelTimeout()
+	defer cancelTimeout() // Assure que les ressources du timeout sont libérées.
+	// 2. On crée un sous-contexte qui écoute les signaux d'arrêt du système (Ctrl+C).
 	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals()
+	defer stopSignals() // Assure que l'écoute des signaux est arrêtée.
+	// Le moteur de calcul `calculator.Calculate` recevra ce `ctx` et devra
+	// vérifier périodiquement s'il a été annulé.
 
-	// --- Démarrage du pool de workers ---
+	// --- Gestion de l'affichage de la progression ---
+	progressChan := make(chan float64, 100) // Canal pour recevoir les pourcentages.
 	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go worker(ctx, &wg, calculator, jobs, results)
+	wg.Add(1)
+	// On lance l'affichage dans une goroutine séparée pour ne pas bloquer le calcul.
+	go displayProgress(&wg, progressChan, out)
+
+	// --- Exécution du calcul ---
+	startTime := time.Now()
+	result, err := calculator.Calculate(ctx, progressChan, config.N)
+
+	// Une fois le calcul terminé (ou en erreur), on ferme le canal de progression
+	// pour signaler à la goroutine d'affichage qu'elle doit se terminer.
+	close(progressChan)
+	wg.Wait() // On attend que la goroutine d'affichage ait fini son travail.
+	duration := time.Since(startTime)
+
+	// --- Gestion des résultats et affichage final ---
+	fmt.Fprintln(out, "\n--- Résultats ---")
+	if err != nil {
+		return handleCalculationError(err, duration, config.Timeout, out)
 	}
 
-	// --- Envoi des tâches dans le canal `jobs` ---
-	for _, n := range tasks {
-		jobs <- Job{N: n}
-	}
-	close(jobs)
-
-	// --- Attente de la fin des workers et fermeture du canal de résultats ---
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// --- Collecte et affichage des résultats ---
-	var successful, failed int
-	for result := range results {
-		if result.Err != nil {
-			failed++
-			// Affiche l'erreur specifique pour le job qui a échoué
-			if errors.Is(result.Err, context.DeadlineExceeded) {
-				fmt.Fprintf(out, "F(%d) a échoué (timeout dépassé) en %s\n", result.Job.N, result.Duration)
-			} else if errors.Is(result.Err, context.Canceled) {
-				// Ce cas peut arriver si le contexte global est annulé pendant qu'un calcul est en cours.
-				fmt.Fprintf(out, "F(%d) a été annulé après %s\n", result.Job.N, result.Duration)
-			} else {
-				fmt.Fprintf(out, "F(%d) a échoué avec une erreur interne en %s : %v\n", result.Job.N, result.Duration, result.Err)
-			}
-		} else {
-			successful++
-			resultStr := result.Value.String()
-			fmt.Fprintf(out, "F(%d) = %s (%d chiffres) [calculé en %s]\n",
-				result.Job.N,
-				truncateString(resultStr, 40),
-				len(resultStr),
-				result.Duration)
-		}
-	}
-
-	fmt.Fprintln(out, "---")
-	fmt.Fprintf(out, "Terminé. %d succès, %d échecs.\n", successful, failed)
-
-	// Vérification si le contexte a été annulé pour le code de sortie global
-	if ctx.Err() != nil {
-		// On a déjà loggé les erreurs individuelles. Ici on donne le statut global.
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			fmt.Fprintln(out, "Statut global : Échec. Le timeout a été atteint.")
-			return ExitErrorTimeout
-		}
-		if errors.Is(ctx.Err(), context.Canceled) {
-			fmt.Fprintln(out, "Statut global : Annulé par l'utilisateur (Ctrl+C).")
-			return ExitErrorCanceled
-		}
-	}
-
-	if failed > 0 {
-		return ExitErrorGeneric
-	}
-
+	displayResult(result, config.N, duration, config.Verbose, out)
 	return ExitSuccess
 }
 
-// truncateString est une fonction utilitaire pour l'affichage.
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+// handleCalculationError traduit les erreurs techniques en messages clairs pour l'utilisateur.
+func handleCalculationError(err error, duration time.Duration, timeout time.Duration, out io.Writer) int {
+	// `errors.Is` est la manière moderne en Go de vérifier le type d'une erreur.
+	if errors.Is(err, context.DeadlineExceeded) {
+		fmt.Fprintf(out, "Statut : Échec. Le calcul a dépassé le délai imparti (%s) après %s.\n", timeout, duration)
+		return ExitErrorTimeout
+	} else if errors.Is(err, context.Canceled) {
+		fmt.Fprintf(out, "Statut : Annulé (signal reçu ou Ctrl+C) après %s.\n", duration)
+		return ExitErrorCanceled
+	} else {
+		fmt.Fprintf(out, "Statut : Échec. Erreur interne : %v\n", err)
+		return ExitErrorGeneric
 	}
-	// Coupe et ajoute "..."
-	if maxLen < 3 {
-		return s[:maxLen]
+}
+
+// displayResult met en forme le résultat final pour l'utilisateur.
+func displayResult(result *big.Int, n uint64, duration time.Duration, verbose bool, out io.Writer) {
+	fmt.Fprintf(out, "Statut : Succès\n")
+	fmt.Fprintf(out, "Durée d'exécution : %s\n", duration)
+	fmt.Fprintf(out, "Taille du résultat : %d bits.\n", result.BitLen())
+
+	resultStr := result.String()
+	numDigits := len(resultStr)
+	fmt.Fprintf(out, "Nombre de chiffres décimaux : %d\n", numDigits)
+
+	// Pour les nombres très grands, on affiche seulement le début et la fin,
+	// sauf si l'utilisateur a demandé l'affichage complet avec `-v`.
+	const truncationLimit = 50
+	const displayEdges = 20
+
+	if verbose {
+		fmt.Fprintf(out, "F(%d) = %s\n", n, resultStr)
+	} else if numDigits > truncationLimit {
+		fmt.Fprintf(out, "F(%d) (tronqué) = %s...%s\n", n, resultStr[:displayEdges], resultStr[numDigits-displayEdges:])
+	} else {
+		fmt.Fprintf(out, "F(%d) = %s\n", n, resultStr)
 	}
-	return s[:maxLen-3] + "..."
+}
+
+// displayProgress gère l'affichage et la mise à jour de la barre de progression.
+func displayProgress(wg *sync.WaitGroup, progressChan <-chan float64, out io.Writer) {
+	defer wg.Done()
+	// On utilise un "ticker" pour rafraîchir l'affichage à intervalle régulier
+	// (ici, toutes les 100ms), plutôt que de le faire à chaque micro-avancée
+	// du calcul, ce qui serait inefficace.
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastProgress := 0.0
+
+	printBar := func(progress float64) {
+		// Le caractère `\r` (retour chariot) déplace le curseur au début de la ligne
+		// sans passer à la ligne suivante, ce qui permet de "réécrire" la barre
+		// de progression sur place pour créer une animation.
+		fmt.Fprintf(out, "\rProgression : %6.2f%% [%-30s]", progress*100, progressBar(progress, 30))
+	}
+
+	// Boucle principale qui attend soit une mise à jour de la progression,
+	// soit le déclenchement du ticker.
+	for {
+		select {
+		case p, ok := <-progressChan:
+			if !ok {
+				// Si le canal est fermé (`ok` est false), cela signifie que le calcul
+				// est terminé. On affiche la barre à 100% et on quitte.
+				printBar(1.0)
+				fmt.Fprintln(out) // Passe à la ligne suivante pour un affichage propre.
+				return
+			}
+			lastProgress = p
+		case <-ticker.C:
+			// Le ticker s'est déclenché, on rafraîchit la barre avec la dernière
+			// progression connue.
+			printBar(lastProgress)
+		}
+	}
+}
+
+// progressBar construit la chaîne de caractères représentant la barre de progression.
+// L'utilisation de `strings.Builder` est une optimisation pour construire des chaînes
+// de caractères efficacement, en évitant des allocations mémoires multiples.
+func progressBar(progress float64, length int) string {
+	if progress > 1.0 {
+		progress = 1.0
+	} else if progress < 0.0 {
+		progress = 0.0
+	}
+
+	count := int(progress * float64(length))
+
+	var builder strings.Builder
+	builder.Grow(length)
+
+	for i := 0; i < length; i++ {
+		if i < count {
+			builder.WriteRune('■')
+		} else {
+			builder.WriteRune(' ')
+		}
+	}
+	return builder.String()
 }
