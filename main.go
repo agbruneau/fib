@@ -39,7 +39,7 @@ type calculationState struct {
 	// State variables
 	f_k  *big.Int // F(k)
 	f_k1 *big.Int // F(k+1)
-	// Temporary variables (t4 added for safe parallel operations O3)
+	// Temporary variables (t4 for parallel operations)
 	t1, t2, t3, t4 *big.Int
 }
 
@@ -88,7 +88,7 @@ func reportProgress(progressChan chan<- float64, progress float64) {
 type OptimizedFastDoubling struct{}
 
 func (fd *OptimizedFastDoubling) Name() string {
-	return "OptimizedFastDoubling (Parallel+ZeroAlloc+FastPath)"
+	return "OptimizedFastDoubling (3-Way-Parallel+ZeroAlloc+FastPath)"
 }
 
 // O1: Fast Path for small N (N <= 93) using native uint64.
@@ -143,41 +143,49 @@ func (fd *OptimizedFastDoubling) Calculate(ctx context.Context, progressChan cha
 
 		// --- Doubling Step (k -> 2k) ---
 
-		// 1. F(2k) = F(k) * [2*F(k+1) - F(k)] (Sequential part)
-		s.t1.Lsh(s.f_k1, 1)   // t1 = 2 * F(k+1)
-		s.t2.Sub(s.t1, s.f_k) // t2 = [2*F(k+1) - F(k)]
-		s.t3.Mul(s.f_k, s.t2) // t3 = F(2k) (MULTIPLICATION 1)
-
-		// 2. F(2k+1) = F(k+1)^2 + F(k)^2 (O3: Parallelizable part)
+		// Pre-computation for F(2k) and F(2k+1) (fast, sequential part)
+		s.t2.Lsh(s.f_k1, 1)   // t2 = 2 * F(k+1)
+		s.t2.Sub(s.t2, s.f_k) // t2 = 2*F(k+1) - F(k)
 
 		// Check threshold and CPU availability.
 		if useParallel && s.f_k1.BitLen() > parallelThreshold {
-			// Execute the two independent squarings concurrently.
-			wg.Add(2)
+			// O4: 3-way parallel multiplication for F(2k) and F(2k+1)
+			wg.Add(3)
 
-			// Goroutine 1: Calculate F(k+1)^2 -> t1
+			// Goroutine 1: F(2k) = F(k) * (2*F(k+1) - F(k))
+			go func(dest, src1, src2 *big.Int) {
+				defer wg.Done()
+				dest.Mul(src1, src2) // MULTIPLICATION 1
+			}(s.t3, s.f_k, s.t2)
+
+			// Goroutine 2: F(k+1)^2
 			go func(dest, src *big.Int) {
 				defer wg.Done()
 				dest.Mul(src, src) // MULTIPLICATION 2
 			}(s.t1, s.f_k1)
 
-			// Goroutine 2: Calculate F(k)^2 -> t4 (Using t4 to avoid race with t1)
+			// Goroutine 3: F(k)^2
 			go func(dest, src *big.Int) {
 				defer wg.Done()
 				dest.Mul(src, src) // MULTIPLICATION 3
 			}(s.t4, s.f_k)
 
 			wg.Wait()
-			s.f_k1.Add(s.t1, s.t4) // Combine results
+
+			// Combine results from parallel calculations
+			s.f_k.Set(s.t3)        // F(k) becomes F(2k)
+			s.f_k1.Add(s.t1, s.t4) // F(k+1) becomes F(2k+1)
 
 		} else {
 			// Sequential execution for smaller numbers or single core.
-			s.t1.Mul(s.f_k1, s.f_k1) // MULTIPLICATION 2
-			s.t4.Mul(s.f_k, s.f_k)   // MULTIPLICATION 3
-			s.f_k1.Add(s.t1, s.t4)
-		}
+			s.t3.Mul(s.f_k, s.t2)    // F(2k) = F(k) * (2*F(k+1) - F(k))
+			s.t1.Mul(s.f_k1, s.f_k1) // F(k+1)^2
+			s.t4.Mul(s.f_k, s.f_k)   // F(k)^2
 
-		s.f_k.Set(s.t3) // Update F(k) to F(2k)
+			// Combine results
+			s.f_k.Set(s.t3)        // F(k) becomes F(2k)
+			s.f_k1.Add(s.t1, s.t4) // F(k+1) becomes F(2k+1)
+		}
 
 		// --- Addition Step (k -> k+1 if necessary) ---
 		if (n>>uint(i))&1 == 1 {
