@@ -296,7 +296,7 @@ type ProgressUpdate struct {
 }
 
 func main() {
-	nFlag := flag.Uint64("n", 10000000, "L'indice 'n' de la séquence de Fibonacci à calculer.")
+	nFlag := flag.Uint64("n", 100000000, "L'indice 'n' de la séquence de Fibonacci à calculer.")
 	verboseFlag := flag.Bool("v", false, "Affiche le résultat complet.")
 	timeoutFlag := flag.Duration("timeout", 5*time.Minute, "Délai maximum (ex: 30s, 1m).")
 	algoFlag := flag.String("algo", "all", "Algorithme : 'fast', 'matrix', ou 'all' (par défaut) pour comparer.")
