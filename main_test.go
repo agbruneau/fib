@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -18,119 +19,147 @@ func bigInt(s string) *big.Int {
 	return n
 }
 
-// testCases shared between both algorithm tests.
-var fibTestCases = []struct {
-	name     string
-	n        uint64
-	expected *big.Int
-}{
-	{"F(0)", 0, big.NewInt(0)},
-	{"F(1)", 1, big.NewInt(1)},
-	{"F(10)", 10, big.NewInt(55)},
-	{"F(93)", MaxFibUint64, bigInt("12200160415121876738")},
-	{"F(94)", 94, bigInt("19740274219868223167")},
-	{"F(250)", 250, bigInt("7896325826131730509282738943634332893686268675876375")},
-}
-
-func TestOptimizedFastDoubling_Calculate(t *testing.T) {
-	calculator := calculatorRegistry["fast"]
-	if calculator == nil {
-		t.Fatal("calculator 'fast' not found in registry")
+// TestCalculators is a table-driven test that covers all registered Fibonacci calculators.
+func TestCalculators(t *testing.T) {
+	// Shared test cases for all Fibonacci calculation algorithms.
+	var fibTestCases = []struct {
+		name     string
+		n        uint64
+		expected *big.Int
+	}{
+		{"F(0)", 0, big.NewInt(0)},
+		{"F(1)", 1, big.NewInt(1)},
+		{"F(10)", 10, big.NewInt(55)},
+		{"F(93)", MaxFibUint64, bigInt("12200160415121876738")},
+		{"F(94)", 94, bigInt("19740274219868223167")},
+		{"F(250)", 250, bigInt("7896325826131730509282738943634332893686268675876375")},
 	}
 
-	for _, tc := range fibTestCases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			result, err := calculator.Calculate(ctx, nil, tc.n)
-			if err != nil {
-				t.Fatalf("Calculate() returned an unexpected error: %v", err)
-			}
-			if result.Cmp(tc.expected) != 0 {
-				t.Errorf("Calculate(%d) = %s; want %s", tc.n, result.String(), tc.expected.String())
-			}
-		})
-	}
-}
-
-func TestMatrixExponentiation_Calculate(t *testing.T) {
-	calculator := calculatorRegistry["matrix"]
-	if calculator == nil {
-		t.Fatal("calculator 'matrix' not found in registry")
-	}
-
-	for _, tc := range fibTestCases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			result, err := calculator.Calculate(ctx, nil, tc.n)
-			if err != nil {
-				t.Fatalf("Calculate() returned an unexpected error: %v", err)
-			}
-			if result.Cmp(tc.expected) != 0 {
-				t.Errorf("Calculate(%d) = %s; want %s", tc.n, result.String(), tc.expected.String())
+	// Iterate over all registered calculators.
+	for name, calculator := range calculatorRegistry {
+		t.Run(fmt.Sprintf("Calculator_%s", name), func(t *testing.T) {
+			t.Parallel() // Run calculators in parallel.
+			for _, tc := range fibTestCases {
+				// Run each specific test case as a sub-test.
+				t.Run(tc.name, func(t *testing.T) {
+					ctx := context.Background()
+					result, err := calculator.Calculate(ctx, nil, tc.n)
+					if err != nil {
+						t.Fatalf("Calculate() returned an unexpected error: %v", err)
+					}
+					if result.Cmp(tc.expected) != 0 {
+						t.Errorf("Calculate(%d) = %s; want %s", tc.n, result.String(), tc.expected.String())
+					}
+				})
 			}
 		})
 	}
 }
 
-func TestRun_Success(t *testing.T) {
-	t.Run("NormalOutput", func(t *testing.T) {
-		var out bytes.Buffer
-		config := AppConfig{N: 20, Verbose: false, Timeout: 1 * time.Minute, Algo: "fast"}
-		exitCode := run(context.Background(), config, &out)
-		if exitCode != ExitSuccess {
-			t.Errorf("Expected exit code %d, got %d", ExitSuccess, exitCode)
-		}
-		if !strings.Contains(out.String(), "F(20) = 6765") {
-			t.Errorf("Expected output to contain 'F(20) = 6765', but it didn't. Got: %s", out.String())
-		}
-	})
+// TestRun orchestrates tests for the `run` function, covering various scenarios.
+func TestRun(t *testing.T) {
+	// Base configuration, can be overridden by specific test cases.
+	baseConfig := AppConfig{
+		Timeout: 1 * time.Minute,
+		Algo:    "fast", // Use a fast algorithm for most tests.
+	}
 
-	t.Run("VerboseOutput", func(t *testing.T) {
-		var out bytes.Buffer
-		config := AppConfig{N: 250, Verbose: true, Timeout: 1 * time.Minute, Algo: "fast"}
-		run(context.Background(), config, &out)
-		expectedResult := "F(250) = 7896325826131730509282738943634332893686268675876375"
-		if !strings.Contains(out.String(), expectedResult) {
-			t.Errorf("Expected verbose output to contain '%s', but it didn't. Got: %s", expectedResult, out.String())
-		}
-	})
+	testCases := []struct {
+		name                 string
+		config               AppConfig
+		contextSetup         func() (context.Context, context.CancelFunc)
+		expectedExitCode     int
+		expectedOutput       []string
+		unexpectedOutput     []string
+		assertOutputContains bool
+	}{
+		{
+			name:   "Success/NormalOutput",
+			config: AppConfig{N: 20, Verbose: false},
+			expectedExitCode: ExitSuccess,
+			expectedOutput:   []string{"F(20) = 6765"},
+		},
+		{
+			name:   "Success/VerboseOutput",
+			config: AppConfig{N: 250, Verbose: true},
+			expectedExitCode: ExitSuccess,
+			expectedOutput: []string{
+				"F(250) = 7896325826131730509282738943634332893686268675876375",
+			},
+		},
+		{
+			name:   "Success/TruncatedOutput",
+			config: AppConfig{N: 250, Verbose: false},
+			expectedExitCode: ExitSuccess,
+			expectedOutput: []string{
+				"F(250) (tronqué) = 78963258261317305092...32893686268675876375",
+			},
+		},
+		{
+			name:   "Error/Timeout",
+			config: AppConfig{N: 100000000, Timeout: 1 * time.Millisecond},
+			expectedExitCode: ExitErrorTimeout,
+			expectedOutput:   []string{"Le calcul a dépassé le délai imparti"},
+		},
+		{
+			name:   "Error/Cancellation",
+			config: AppConfig{N: 100000000},
+			contextSetup: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel() // Immediately cancel the context.
+				return ctx, cancel
+			},
+			expectedExitCode: ExitErrorCanceled,
+			expectedOutput:   []string{"Statut : Annulé"},
+		},
+		{
+			name:             "Error/UnknownAlgorithm",
+			config:           AppConfig{Algo: "unknown"},
+			expectedExitCode: ExitErrorGeneric,
+			expectedOutput:   []string{"Erreur : algorithme 'unknown' inconnu"},
+		},
+	}
 
-	t.Run("TruncatedOutput", func(t *testing.T) {
-		var out bytes.Buffer
-		config := AppConfig{N: 250, Verbose: false, Timeout: 1 * time.Minute, Algo: "fast"}
-		run(context.Background(), config, &out)
-		expectedTrunc := "F(250) (tronqué) = 78963258261317305092...32893686268675876375"
-		if !strings.Contains(out.String(), expectedTrunc) {
-			t.Errorf("Expected output to be truncated. Expected to contain '%s'. Got: %s", expectedTrunc, out.String())
-		}
-	})
-}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			// Apply base config defaults if not set in test case
+			finalConfig := baseConfig
+			if tc.config.N != 0 {
+				finalConfig.N = tc.config.N
+			}
+			finalConfig.Verbose = tc.config.Verbose
+			if tc.config.Timeout != 0 {
+				finalConfig.Timeout = tc.config.Timeout
+			}
+			if tc.config.Algo != "" {
+				finalConfig.Algo = tc.config.Algo
+			}
 
-func TestRun_Errors(t *testing.T) {
-	t.Run("Timeout", func(t *testing.T) {
-		var out bytes.Buffer
-		// Use a fast algorithm so timeout is reliable
-		config := AppConfig{N: 10000000, Timeout: 1 * time.Millisecond, Algo: "fast"}
-		exitCode := run(context.Background(), config, &out)
-		if exitCode != ExitErrorTimeout {
-			t.Errorf("Expected exit code %d for timeout, got %d", ExitErrorTimeout, exitCode)
-		}
-		if !strings.Contains(out.String(), "Le calcul a dépassé le délai imparti") {
-			t.Errorf("Expected output to contain timeout message, but it didn't. Got: %s", out.String())
-		}
-	})
+			ctx := context.Background()
+			if tc.contextSetup != nil {
+				var cancel context.CancelFunc
+				ctx, cancel = tc.contextSetup()
+				defer cancel()
+			}
 
-	t.Run("Cancellation", func(t *testing.T) {
-		var out bytes.Buffer
-		config := AppConfig{N: 10000000, Timeout: 1 * time.Minute, Algo: "fast"}
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		exitCode := run(ctx, config, &out)
-		if exitCode != ExitErrorCanceled {
-			t.Errorf("Expected exit code %d for cancellation, got %d", ExitErrorCanceled, exitCode)
-		}
-		if !strings.Contains(out.String(), "Statut : Annulé") {
-			t.Errorf("Expected output to contain cancellation message, but it didn't. Got: %s", out.String())
-		}
-	})
+			exitCode := run(ctx, finalConfig, &out)
+
+			if exitCode != tc.expectedExitCode {
+				t.Errorf("Expected exit code %d, got %d. Output:\n%s", tc.expectedExitCode, exitCode, out.String())
+			}
+
+			outputStr := out.String()
+			for _, expected := range tc.expectedOutput {
+				if !strings.Contains(outputStr, expected) {
+					t.Errorf("Expected output to contain '%s', but it didn't.\nFull output:\n%s", expected, outputStr)
+				}
+			}
+			for _, unexpected := range tc.unexpectedOutput {
+				if strings.Contains(outputStr, unexpected) {
+					t.Errorf("Expected output to NOT contain '%s', but it did.\nFull output:\n%s", unexpected, outputStr)
+				}
+			}
+		})
+	}
 }
