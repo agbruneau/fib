@@ -56,6 +56,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -96,6 +97,35 @@ type Calculator interface {
 
 	// Name retourne le nom descriptif de l'algorithme.
 	Name() string
+}
+
+// coreCalculator est une interface interne pour le cœur d'un algorithme de
+// Fibonacci, sans la logique commune (comme le "fast path").
+type coreCalculator interface {
+	CalculateCore(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error)
+	Name() string
+}
+
+// FibCalculator est un décorateur qui prend un `coreCalculator` et lui ajoute
+// la logique commune, comme l'optimisation "fast path". Il implémente
+// l'interface publique `Calculator`.
+type FibCalculator struct {
+	core coreCalculator
+}
+
+// Name retourne le nom du calculateur de cœur.
+func (c *FibCalculator) Name() string {
+	return c.core.Name()
+}
+
+// Calculate exécute le calcul. Il gère d'abord le cas rapide (n <= 93)
+// et délègue au calculateur de cœur pour les grands nombres.
+func (c *FibCalculator) Calculate(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error) {
+	if n <= MaxFibUint64 {
+		reportProgress(progressChan, 1.0)
+		return calculateSmall(n), nil
+	}
+	return c.core.CalculateCore(ctx, progressChan, n)
 }
 
 // reportProgress envoie une valeur de progression dans le canal `progressChan`
@@ -210,18 +240,12 @@ type OptimizedFastDoubling struct{}
 
 // Name retourne le nom de l'algorithme, incluant les optimisations clés.
 func (fd *OptimizedFastDoubling) Name() string {
-	return "OptimizedFastDoubling (3-Way-Parallel+ZeroAlloc+FastPath)"
+	return "OptimizedFastDoubling (3-Way-Parallel+ZeroAlloc)"
 }
 
-// Calculate exécute l'algorithme Fast Doubling pour F(n).
-func (fd *OptimizedFastDoubling) Calculate(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error) {
-	// Optimisation "Fast Path": pour n <= 93, on utilise l'algorithme itératif
-	// simple qui est beaucoup plus rapide.
-	if n <= MaxFibUint64 {
-		reportProgress(progressChan, 1.0)
-		return calculateSmall(n), nil
-	}
-
+// CalculateCore exécute le cœur de l'algorithme Fast Doubling pour F(n).
+// La logique du "fast path" est gérée par le FibCalculator qui l'enveloppe.
+func (fd *OptimizedFastDoubling) CalculateCore(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error) {
 	// Récupération d'un état depuis le pool. `defer` garantit qu'il sera
 	// retourné au pool à la fin de la fonction, même en cas d'erreur.
 	s := getState()
@@ -327,6 +351,14 @@ type matrix struct {
 	a, b, c, d *big.Int
 }
 
+// Set copie les valeurs d'une autre matrice dans la matrice réceptrice (m).
+func (m *matrix) Set(other *matrix) {
+	m.a.Set(other.a)
+	m.b.Set(other.b)
+	m.c.Set(other.c)
+	m.d.Set(other.d)
+}
+
 // matrixState contient tous les objets nécessaires pour le calcul par
 // exponentiation matricielle. Comme pour `calculationState`, cette structure
 // est mise en pool avec `sync.Pool` pour recycler la mémoire.
@@ -377,7 +409,7 @@ type MatrixExponentiation struct{}
 
 // Name retourne le nom de l'algorithme, incluant les optimisations clés.
 func (me *MatrixExponentiation) Name() string {
-	return "MatrixExponentiation (Parallel+ZeroAlloc+FastPath)"
+	return "MatrixExponentiation (Parallel+ZeroAlloc)"
 }
 
 // multiplyMatrices effectue la multiplication `dest = m1 * m2`.
@@ -417,17 +449,11 @@ func multiplyMatrices(dest, m1, m2 *matrix, s *matrixState, useParallel bool) {
 	dest.d.Add(s.t7, s.t8) // d = t7+t8
 }
 
-// Calculate exécute l'algorithme pour F(n) via l'exponentiation matricielle.
-func (me *MatrixExponentiation) Calculate(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error) {
-	if n == 0 {
-		reportProgress(progressChan, 1.0)
-		return big.NewInt(0), nil
-	}
-	if n <= MaxFibUint64 {
-		reportProgress(progressChan, 1.0)
-		return calculateSmall(n), nil
-	}
-
+// CalculateCore exécute le cœur de l'algorithme pour F(n) via l'exponentiation matricielle.
+// La logique du "fast path" est gérée par le FibCalculator qui l'enveloppe.
+func (me *MatrixExponentiation) CalculateCore(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error) {
+	// La vérification n=0 est gérée par le fast path.
+	// La logique de base ici suppose n > 0.
 	s := getMatrixState()
 	defer putMatrixState(s)
 
@@ -454,21 +480,13 @@ func (me *MatrixExponentiation) Calculate(ctx context.Context, progressChan chan
 		// res = res * p
 		if (k>>uint(i))&1 == 1 {
 			multiplyMatrices(tempMatrix, s.res, s.p, s, useParallel)
-			// Copie du résultat de tempMatrix vers s.res
-			s.res.a.Set(tempMatrix.a)
-			s.res.b.Set(tempMatrix.b)
-			s.res.c.Set(tempMatrix.c)
-			s.res.d.Set(tempMatrix.d)
+			s.res.Set(tempMatrix) // Copie du résultat.
 		}
 
 		// On met la matrice p au carré pour l'itération suivante.
 		// p = p * p
 		multiplyMatrices(tempMatrix, s.p, s.p, s, useParallel)
-		// Copie du résultat de tempMatrix vers s.p
-		s.p.a.Set(tempMatrix.a)
-		s.p.b.Set(tempMatrix.b)
-		s.p.c.Set(tempMatrix.c)
-		s.p.d.Set(tempMatrix.d)
+		s.p.Set(tempMatrix) // Copie du résultat.
 	}
 
 	reportProgress(progressChan, 1.0)
@@ -509,6 +527,15 @@ type ProgressUpdate struct {
 	Value           float64 // Progression (0.0 à 1.0).
 }
 
+// calculatorRegistry centralise la liste des algorithmes de calcul disponibles.
+// L'utilisation d'un registre permet d'ajouter de nouveaux algorithmes en ne
+// les déclarant qu'à un seul endroit. La clé est le nom utilisé dans l'argument
+// de ligne de commande --algo.
+var calculatorRegistry = map[string]Calculator{
+	"fast":   &FibCalculator{core: &OptimizedFastDoubling{}},
+	"matrix": &FibCalculator{core: &MatrixExponentiation{}},
+}
+
 // main est le point d'entrée du programme.
 func main() {
 	// Configuration et analyse des arguments de la ligne de commande avec le package `flag`.
@@ -533,140 +560,134 @@ func main() {
 	os.Exit(exitCode)
 }
 
-// run est la fonction d'orchestration principale.
-// Elle configure le contexte pour la gestion du timeout et des signaux,
-// puis délègue le calcul au mode approprié (simple ou comparaison).
-func run(ctx context.Context, config AppConfig, out io.Writer) int {
-	// Création d'un contexte avec un timeout. Si le calcul dépasse `config.Timeout`,
-	// le contexte sera annulé, propageant un signal d'arrêt dans tout le programme.
-	ctx, cancelTimeout := context.WithTimeout(ctx, config.Timeout)
-	defer cancelTimeout() // `defer` garantit que le timer est bien libéré.
+// CalculationResult stocke le résultat d'un seul calcul, incluant la durée et
+// une potentielle erreur.
+type CalculationResult struct {
+	Name     string
+	Result   *big.Int
+	Duration time.Duration
+	Err      error
+}
 
-	// Création d'un second contexte qui écoute les signaux d'interruption du système
-	// (SIGINT pour Ctrl+C, SIGTERM pour une demande d'arrêt).
-	// Si un de ces signaux est reçu, le contexte est annulé.
+// run est la fonction d'orchestration principale.
+// Elle configure le contexte, sélectionne les calculateurs, les exécute,
+// puis analyse et affiche les résultats.
+func run(ctx context.Context, config AppConfig, out io.Writer) int {
+	ctx, cancelTimeout := context.WithTimeout(ctx, config.Timeout)
+	defer cancelTimeout()
 	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
-	// Affichage des informations initiales.
 	fmt.Fprintf(out, "Calcul de F(%d)...\n", config.N)
 	fmt.Fprintf(out, "Nombre de cœurs CPU disponibles : %d\n", runtime.NumCPU())
 	fmt.Fprintf(out, "Timeout défini à %s.\n", config.Timeout)
 
-	// Aiguillage vers la bonne fonction en fonction de l'algorithme choisi.
+	// --- Sélection des calculateurs ---
+	var calculatorsToRun []Calculator
 	algo := strings.ToLower(config.Algo)
+
 	if algo == "all" {
-		return runAllAndCompare(ctx, config, out)
+		fmt.Fprintf(out, "Mode comparaison : Lancement de %d algorithmes en parallèle...\n", len(calculatorRegistry))
+		// Ordonner les clés du registre pour garantir un affichage stable.
+		keys := make([]string, 0, len(calculatorRegistry))
+		for k := range calculatorRegistry {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			calculatorsToRun = append(calculatorsToRun, calculatorRegistry[k])
+		}
+	} else {
+		calculator, ok := calculatorRegistry[algo]
+		if !ok {
+			availableAlgos := make([]string, 0, len(calculatorRegistry))
+			for k := range calculatorRegistry {
+				availableAlgos = append(availableAlgos, "'"+k+"'")
+			}
+			fmt.Fprintf(out, "Erreur : algorithme '%s' inconnu. Choix possibles : %s, ou 'all'.\n",
+				config.Algo, strings.Join(availableAlgos, ", "))
+			return ExitErrorGeneric
+		}
+		fmt.Fprintf(out, "Algorithme : %s\n", calculator.Name())
+		calculatorsToRun = append(calculatorsToRun, calculator)
 	}
-	return runSingle(ctx, config, algo, out)
+
+	// --- Exécution ---
+	results := executeCalculations(ctx, calculatorsToRun, config, out)
+
+	// --- Analyse et affichage des résultats ---
+	if len(results) == 1 {
+		res := results[0]
+		fmt.Fprintln(out, "\n--- Résultats ---")
+		if res.Err != nil {
+			return handleCalculationError(res.Err, res.Duration, config.Timeout, out)
+		}
+		displayResult(res.Result, config.N, res.Duration, config.Verbose, out)
+		return ExitSuccess
+	}
+	return analyzeComparisonResults(results, config, out)
 }
 
-// runSingle exécute un seul algorithme de calcul.
-func runSingle(ctx context.Context, config AppConfig, algoName string, out io.Writer) int {
-	// Sélection de l'implémentation de l'interface `Calculator` en fonction du nom.
-	var calculator Calculator
-	switch algoName {
-	case "fast":
-		calculator = &OptimizedFastDoubling{}
-	case "matrix":
-		calculator = &MatrixExponentiation{}
-	default:
-		fmt.Fprintf(out, "Erreur : algorithme '%s' inconnu. Choix possibles : 'fast', 'matrix', 'all'.\n", config.Algo)
-		return ExitErrorGeneric
-	}
-
-	fmt.Fprintf(out, "Algorithme : %s\n", calculator.Name())
-
-	// Création du canal pour recevoir les mises à jour de progression.
-	progressChan := make(chan float64, 100)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	// Lancement de la goroutine qui affichera la barre de progression.
-	go displayProgress(&wg, progressChan, out)
-
-	startTime := time.Now()
-	// Appel de la méthode Calculate. C'est ici que le calcul principal a lieu.
-	result, err := calculator.Calculate(ctx, progressChan, config.N)
-	close(progressChan) // Fermeture du canal pour signaler à `displayProgress` de s'arrêter.
-	wg.Wait()           // Attente que la goroutine d'affichage ait terminé.
-	duration := time.Since(startTime)
-
-	fmt.Fprintln(out, "\n--- Résultats ---")
-	if err != nil {
-		// Gestion centralisée des erreurs de calcul (timeout, annulé, etc.).
-		return handleCalculationError(err, duration, config.Timeout, out)
-	}
-
-	// Affichage du résultat final.
-	displayResult(result, config.N, duration, config.Verbose, out)
-	return ExitSuccess
-}
-
-// runAllAndCompare exécute les deux algorithmes en parallèle et compare leurs résultats.
-// C'est un excellent moyen de valider l'exactitude des implémentations.
-func runAllAndCompare(ctx context.Context, config AppConfig, out io.Writer) int {
-	calculators := []Calculator{
-		&OptimizedFastDoubling{},
-		&MatrixExponentiation{},
-	}
-
-	// Structure pour stocker le résultat de chaque calcul.
-	type CalculationResult struct {
-		Name     string
-		Result   *big.Int
-		Duration time.Duration
-		Err      error
-	}
-
+// executeCalculations exécute un ou plusieurs calculateurs en parallèle et gère l'affichage de la progression.
+func executeCalculations(ctx context.Context, calculators []Calculator, config AppConfig, out io.Writer) []CalculationResult {
 	results := make([]CalculationResult, len(calculators))
-	var calcWg, displayWg sync.WaitGroup
+	// On a besoin de 3 WaitGroups pour synchroniser correctement les différentes étapes :
+	// 1. calcWg: pour attendre la fin des calculs principaux.
+	// 2. proxyWg: pour attendre que les goroutines intermédiaires (proxy) aient fini de rapporter la progression.
+	// 3. displayWg: pour attendre que la goroutine d'affichage ait fini de s'imprimer.
+	var calcWg, proxyWg, displayWg sync.WaitGroup
 
-	fmt.Fprintf(out, "Mode comparaison : Lancement de %d algorithmes en parallèle...\n", len(calculators))
-
-	// Canal unique pour agréger la progression de tous les calculateurs.
-	globalProgressChan := make(chan ProgressUpdate, len(calculators)*10)
+	progressChan := make(chan ProgressUpdate, len(calculators)*10)
 	displayWg.Add(1)
-	go displayGlobalProgress(&displayWg, globalProgressChan, len(calculators), out)
+	go displayAggregateProgress(&displayWg, progressChan, len(calculators), out)
 
-	// Lancement de chaque calculateur dans sa propre goroutine.
 	for i, calc := range calculators {
 		calcWg.Add(1)
 		go func(idx int, calculator Calculator) {
 			defer calcWg.Done()
 
-			// Création d'un "canal proxy" pour intercepter la progression de ce
-			// calcul spécifique et la rediriger vers le canal global avec son index.
 			proxyChan := make(chan float64, 100)
+			proxyWg.Add(1)
 			go func() {
+				defer proxyWg.Done()
 				for p := range proxyChan {
-					globalProgressChan <- ProgressUpdate{CalculatorIndex: idx, Value: p}
+					progressChan <- ProgressUpdate{CalculatorIndex: idx, Value: p}
 				}
 			}()
 
 			startTime := time.Now()
 			res, err := calculator.Calculate(ctx, proxyChan, config.N)
-			close(proxyChan)
-			duration := time.Since(startTime)
+			close(proxyChan) // Ferme le proxy, ce qui terminera la goroutine du proxy.
 
 			results[idx] = CalculationResult{
 				Name:     calculator.Name(),
 				Result:   res,
-				Duration: duration,
+				Duration: time.Since(startTime),
 				Err:      err,
 			}
 		}(i, calc)
 	}
 
-	calcWg.Wait()           // Attente de la fin de tous les calculs.
-	close(globalProgressChan) // Fermeture du canal de progression globale.
-	displayWg.Wait()        // Attente de la fin de l'affichage de la progression.
+	// Le séquence d'attente est cruciale :
+	// 1. Attendre la fin des calculs.
+	calcWg.Wait()
+	// 2. Attendre que toutes les goroutines de proxy aient fini d'envoyer leurs messages.
+	proxyWg.Wait()
+	// 3. Maintenant, il est sûr de fermer le canal de progression principal.
+	close(progressChan)
+	// 4. Attendre que la goroutine d'affichage se termine.
+	displayWg.Wait()
 
+	return results
+}
+
+// analyzeComparisonResults traite les résultats du mode "all" (comparaison).
+func analyzeComparisonResults(results []CalculationResult, config AppConfig, out io.Writer) int {
 	fmt.Fprintln(out, "\n--- Résultats de la comparaison ---")
 
 	var firstResult *big.Int
 	var firstError error
 
-	// Affichage et analyse des résultats.
 	for _, res := range results {
 		status := "Succès"
 		if res.Err != nil {
@@ -689,14 +710,13 @@ func runAllAndCompare(ctx context.Context, config AppConfig, out io.Writer) int 
 
 	// Vérification cruciale : les résultats sont-ils identiques ?
 	for i := 1; i < len(results); i++ {
-		if results[i].Result.Cmp(firstResult) != 0 {
+		if results[i].Result == nil || results[i].Result.Cmp(firstResult) != 0 {
 			fmt.Fprintln(out, "\nStatut : Échec critique. Les algorithmes ont produit des résultats différents !")
 			return ExitErrorMismatch
 		}
 	}
 	fmt.Fprintln(out, "\nValidation : Tous les résultats sont identiques.")
 
-	// Affichage du résultat (celui du premier, puisqu'ils sont tous identiques).
 	displayResult(firstResult, config.N, 0, config.Verbose, out)
 	return ExitSuccess
 }
@@ -748,43 +768,9 @@ func displayResult(result *big.Int, n uint64, duration time.Duration, verbose bo
 	}
 }
 
-// displayProgress gère l'affichage d'une barre de progression pour un seul calcul.
-func displayProgress(wg *sync.WaitGroup, progressChan <-chan float64, out io.Writer) {
-	defer wg.Done()
-	// Un "ticker" se déclenche à intervalle régulier (ici, 10 fois par seconde).
-	// Cela permet de rafraîchir la barre de progression de manière fluide, sans
-	// surcharger le terminal, même si les mises à jour de progression arrivent très vite.
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	lastProgress := 0.0
-
-	printBar := func(progress float64) {
-		// \r (retour chariot) déplace le curseur au début de la ligne, ce qui
-		// permet de réécrire par-dessus la ligne précédente pour animer la barre.
-		fmt.Fprintf(out, "\rProgression : %6.2f%% [%-30s]", progress*100, progressBar(progress, 30))
-	}
-
-	for {
-		select {
-		case p, ok := <-progressChan:
-			// Une nouvelle mise à jour de progression est arrivée du calculateur.
-			if !ok {
-				// Le canal a été fermé : le calcul est terminé.
-				printBar(1.0)      // Affiche la barre à 100%.
-				fmt.Fprintln(out) // Passe à la ligne suivante pour ne pas écraser la barre finie.
-				return
-			}
-			lastProgress = p
-		case <-ticker.C:
-			// Le ticker s'est déclenché, on rafraîchit la barre avec la dernière valeur connue.
-			printBar(lastProgress)
-		}
-	}
-}
-
-// displayGlobalProgress est similaire à `displayProgress`, mais agrège la
-// progression de plusieurs calculateurs pour afficher une barre de progression moyenne.
-func displayGlobalProgress(wg *sync.WaitGroup, progressChan <-chan ProgressUpdate, numCalculators int, out io.Writer) {
+// displayAggregateProgress agrège la progression d'un ou plusieurs calculateurs
+// et affiche une barre de progression moyenne.
+func displayAggregateProgress(wg *sync.WaitGroup, progressChan <-chan ProgressUpdate, numCalculators int, out io.Writer) {
 	defer wg.Done()
 	progresses := make([]float64, numCalculators)
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -796,7 +782,13 @@ func displayGlobalProgress(wg *sync.WaitGroup, progressChan <-chan ProgressUpdat
 			totalProgress += p
 		}
 		avgProgress := totalProgress / float64(numCalculators)
-		fmt.Fprintf(out, "\rProgression Globale : %6.2f%% [%-30s]", avgProgress*100, progressBar(avgProgress, 30))
+
+		// Le libellé change si c'est un ou plusieurs calculateurs pour plus de clarté.
+		label := "Progression"
+		if numCalculators > 1 {
+			label = "Progression Globale"
+		}
+		fmt.Fprintf(out, "\r%s : %6.2f%% [%-30s]", label, avgProgress*100, progressBar(avgProgress, 30))
 	}
 
 	for {
