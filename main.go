@@ -409,7 +409,50 @@ type MatrixExponentiation struct{}
 
 // Name retourne le nom de l'algorithme, incluant les optimisations clés.
 func (me *MatrixExponentiation) Name() string {
-	return "MatrixExponentiation (Parallel+ZeroAlloc)"
+	return "MatrixExponentiation (SymmetricOpt+Parallel+ZeroAlloc)"
+}
+
+// squareSymmetricMatrix calculates dest = m * m where m is a symmetric matrix.
+// A symmetric matrix is of the form [[a, b], [b, d]].
+// Squaring it results in [[a*a+b*b, b*(a+d)], [b*(a+d), b*b+d*d]].
+// This can be computed with only 4 big.Int multiplications instead of 8 for
+// a generic matrix multiplication, significantly speeding up the process.
+func squareSymmetricMatrix(dest, m *matrix, s *matrixState, useParallel bool) {
+	var wg sync.WaitGroup
+
+	// We need 4 multiplications: a*a, b*b, d*d, and b*(a+d)
+	// We use the temporary big.Ints from the matrixState pool.
+	t_a_sq := s.t1
+	t_b_sq := s.t2
+	t_d_sq := s.t3
+	t_b_ad := s.t4
+	t_a_plus_d := s.t5 // For the intermediate sum a+d
+
+	t_a_plus_d.Add(m.a, m.d)
+
+	if useParallel && m.a.BitLen() > parallelThreshold {
+		wg.Add(4)
+		go func() { defer wg.Done(); t_a_sq.Mul(m.a, m.a) }()         // a^2
+		go func() { defer wg.Done(); t_b_sq.Mul(m.b, m.b) }()         // b^2
+		go func() { defer wg.Done(); t_d_sq.Mul(m.d, m.d) }()         // d^2
+		go func() { defer wg.Done(); t_b_ad.Mul(m.b, t_a_plus_d) }() // b*(a+d)
+		wg.Wait()
+	} else {
+		t_a_sq.Mul(m.a, m.a)
+		t_b_sq.Mul(m.b, m.b)
+		t_d_sq.Mul(m.d, m.d)
+		t_b_ad.Mul(m.b, t_a_plus_d)
+	}
+
+	// Assemble the final matrix coefficients from the results.
+	// dest.a = a^2 + b^2
+	dest.a.Add(t_a_sq, t_b_sq)
+	// dest.b = b*(a+d)
+	dest.b.Set(t_b_ad)
+	// dest.c = dest.b because the resulting matrix is also symmetric.
+	dest.c.Set(t_b_ad)
+	// dest.d = b^2 + d^2
+	dest.d.Add(t_b_sq, t_d_sq)
 }
 
 // multiplyMatrices effectue la multiplication `dest = m1 * m2`.
@@ -485,7 +528,8 @@ func (me *MatrixExponentiation) CalculateCore(ctx context.Context, progressChan 
 
 		// On met la matrice p au carré pour l'itération suivante.
 		// p = p * p
-		multiplyMatrices(tempMatrix, s.p, s.p, s, useParallel)
+		// On utilise la fonction optimisée car p (puissance de Q) est toujours symétrique.
+		squareSymmetricMatrix(tempMatrix, s.p, s, useParallel)
 		s.p.Set(tempMatrix) // Copie du résultat.
 	}
 
