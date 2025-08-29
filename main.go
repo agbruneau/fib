@@ -319,30 +319,92 @@ func (fd *OptimizedFastDoubling) CalculateCore(ctx context.Context, progressChan
 // IMPLÉMENTATION 2: ALGORITHME D'EXPONENTIATION MATRICIELLE
 // ----------------------------------------------------------------------------
 //
-// Cette approche utilise une propriété remarquable de la suite de Fibonacci
-// liée à l'algèbre linéaire. Elle est également de complexité O(log n).
+// Cette approche, de complexité O(log n), est une méthode élégante qui utilise
+// l'algèbre linéaire pour calculer les nombres de Fibonacci. Elle est souvent un
+// peu moins performante que le "Fast Doubling" en pratique à cause d'un plus
+// grand nombre de multiplications, mais elle reste un exemple classique et
+// puissant de la façon dont un problème récursif peut être transformé en un
+// problème d'exponentiation.
 //
-// Principe mathématique :
-// La transition de (F(n-1), F(n)) à (F(n), F(n+1)) peut être décrite par une
-// multiplication matricielle :
+// 1. LE PRINCIPE MATHÉMATIQUE : LA MATRICE DE FIBONACCI
+// ---------------------------------------------------------
+// La relation de récurrence F(n+1) = F(n) + F(n-1) peut être exprimée sous
+// forme matricielle. L'idée est de trouver une matrice 2x2, appelée Q, qui,
+// lorsqu'elle est multipliée par un vecteur contenant deux termes consécutifs
+// de la suite, nous donne le vecteur des deux termes suivants.
+//
+// On cherche à passer de [ F(n), F(n-1) ] à [ F(n+1), F(n) ].
+//
+//  [ F(n+1) ] = [ F(n) + F(n-1) ]
+//  [ F(n)   ] = [ F(n)          ]
+//
+// Ceci peut se réécrire comme une multiplication de matrice :
 //
 //  [ F(n+1) ]   [ 1  1 ] [ F(n)   ]
 //  [        ] = [      ] [        ]
 //  [ F(n)   ]   [ 1  0 ] [ F(n-1) ]
 //
-// En appliquant cette transformation `n` fois à partir de (F(0), F(1)), on
-// obtient F(n). Cela revient à élever la "matrice de Fibonacci" à la puissance n:
+// La matrice Q = [[1, 1], [1, 0]] est la "matrice de Fibonacci".
 //
-//  [ F(n+1)  F(n)   ]   [ 1  1 ]^n
+// En appliquant cette transformation n fois à partir de l'état initial [F(1), F(0)] = [1, 0],
+// on obtient une formule générale :
+//
+//  [ F(n+1)  F(n)   ]   [ 1  1 ]^n   (soit Q^n)
 //  [                ] = [      ]
 //  [ F(n)    F(n-1) ]   [ 1  0 ]
 //
-// Pour trouver F(n), il suffit donc de calculer la matrice [[1,1],[1,0]]^(n-1),
-// le résultat se trouvera dans le coefficient en haut à gauche.
+// Pour calculer F(n), il nous suffit donc d'élever la matrice Q à la puissance n.
+// Le résultat F(n) sera le coefficient en haut à droite (ou en bas à gauche) de la matrice résultante.
+// Note : ce programme calcule Q^(n-1) et prend le coefficient en haut à gauche, ce qui est équivalent.
 //
-// L'élévation à la puissance `n-1` est réalisée efficacement via l'algorithme
-// "d'exponentiation par carré", qui fonctionne sur les matrices comme sur les
-// nombres, en O(log n) opérations.
+//
+// 2. L'OPTIMISATION : L'EXPONENTIATION PAR CARRÉ (BINARY EXPONENTIATION)
+// ---------------------------------------------------------------------
+// Calculer Q^n en multipliant Q par lui-même n-1 fois serait inefficace (O(n)).
+// On utilise plutôt l'exponentiation par carré, un algorithme en O(log n).
+//
+// L'idée est de décomposer l'exposant `n` en sa représentation binaire.
+// Par exemple, pour calculer x^13 :
+// L'exposant 13 en binaire est 1101 (8 + 4 + 0 + 1).
+// Donc, x^13 = x^(8+4+1) = x^8 * x^4 * x^1.
+//
+// L'algorithme fonctionne ainsi :
+//   a. On commence avec un résultat (res = 1) et une puissance de x (p = x).
+//   b. On parcourt les bits de l'exposant de droite à gauche.
+//   c. Si le bit est 1, on multiplie le résultat par la puissance courante : res = res * p.
+//   d. On met la puissance au carré pour le bit suivant : p = p * p.
+//
+// Exemple pour x^13 (1101):
+// - bit 0 (1): res = 1 * x^1 = x      | p devient x^2
+// - bit 1 (0): res = x                | p devient x^4
+// - bit 2 (1): res = x * x^4 = x^5    | p devient x^8
+// - bit 3 (1): res = x^5 * x^8 = x^13 | p devient x^16
+//
+// Ce principe s'applique à l'identique pour les matrices. On calcule Q^n en
+// n'effectuant que des multiplications et des mises au carré de matrices.
+//
+//
+// 3. OPTIMISATION SPÉCIFIQUE : LA SYMETRIE DE LA MATRICE
+// ---------------------------------------------------------
+// La matrice Q est symétrique (Q[i,j] = Q[j,i]). Une propriété utile est que
+// le produit de matrices symétriques n'est pas toujours symétrique, mais la
+// *puissance* d'une matrice symétrique l'est toujours.
+//
+// Donc, toutes les matrices `p` (les puissances de Q) dans l'algorithme
+// d'exponentiation seront symétriques. Une matrice symétrique 2x2 a la forme :
+//
+//   [ a  b ]
+//   [ b  d ]
+//
+// La mise au carré d'une telle matrice donne :
+//
+//   [ a^2 + b^2    a*b + b*d ]   [ a^2 + b^2    b*(a+d) ]
+//   [ b*a + d*b    b^2 + d^2 ] = [ b*(a+d)    b^2 + d^2 ]
+//
+// Le calcul de ce carré ne requiert que 4 multiplications (a*a, b*b, d*d, b*(a+d))
+// au lieu des 8 nécessaires pour une multiplication de matrices génériques.
+// Cette optimisation, implémentée dans `squareSymmetricMatrix`, divise presque
+// par deux le coût de chaque étape de mise au carré.
 
 // matrix représente une matrice 2x2 de grands entiers.
 // [ a  b ]
@@ -412,21 +474,24 @@ func (me *MatrixExponentiation) Name() string {
 	return "MatrixExponentiation (SymmetricOpt+Parallel+ZeroAlloc)"
 }
 
-// squareSymmetricMatrix calculates dest = m * m where m is a symmetric matrix.
-// A symmetric matrix is of the form [[a, b], [b, d]].
-// Squaring it results in [[a*a+b*b, b*(a+d)], [b*(a+d), b*b+d*d]].
-// This can be computed with only 4 big.Int multiplications instead of 8 for
-// a generic matrix multiplication, significantly speeding up the process.
+// squareSymmetricMatrix calcule `dest = m * m` où `m` est une matrice symétrique.
+// Une matrice symétrique est de la forme [[a, b], [b, d]]. La mettre au carré
+// résulte en [[a*a+b*b, b*(a+d)], [b*(a+d), b*b+d*d]].
+//
+// Ce calcul peut être effectué avec seulement 4 multiplications de `big.Int` au
+// lieu des 8 requises pour une multiplication de matrices générique, ce qui
+// accélère considérablement le processus. C'est l'optimisation la plus
+// importante de cet algorithme.
 func squareSymmetricMatrix(dest, m *matrix, s *matrixState, useParallel bool) {
 	var wg sync.WaitGroup
 
-	// We need 4 multiplications: a*a, b*b, d*d, and b*(a+d)
-	// We use the temporary big.Ints from the matrixState pool.
+	// Nous avons besoin de 4 multiplications : a*a, b*b, d*d, et b*(a+d).
+	// Nous utilisons les entiers temporaires du pool `matrixState`.
 	t_a_sq := s.t1
 	t_b_sq := s.t2
 	t_d_sq := s.t3
 	t_b_ad := s.t4
-	t_a_plus_d := s.t5 // For the intermediate sum a+d
+	t_a_plus_d := s.t5 // Pour la somme intermédiaire a+d
 
 	t_a_plus_d.Add(m.a, m.d)
 
@@ -444,21 +509,25 @@ func squareSymmetricMatrix(dest, m *matrix, s *matrixState, useParallel bool) {
 		t_b_ad.Mul(m.b, t_a_plus_d)
 	}
 
-	// Assemble the final matrix coefficients from the results.
+	// Assemblage des coefficients de la matrice finale à partir des résultats.
 	// dest.a = a^2 + b^2
 	dest.a.Add(t_a_sq, t_b_sq)
 	// dest.b = b*(a+d)
 	dest.b.Set(t_b_ad)
-	// dest.c = dest.b because the resulting matrix is also symmetric.
+	// dest.c = dest.b car la matrice résultante est aussi symétrique.
 	dest.c.Set(t_b_ad)
 	// dest.d = b^2 + d^2
 	dest.d.Add(t_b_sq, t_d_sq)
 }
 
-// multiplyMatrices effectue la multiplication `dest = m1 * m2`.
+// multiplyMatrices effectue la multiplication générique `dest = m1 * m2`.
+//
+// Formule de multiplication pour deux matrices 2x2 :
+//  [ a1  b1 ] * [ a2  b2 ] = [ a1*a2+b1*c2  a1*b2+b1*d2 ]
+//  [ c1  d1 ]   [ c2  d2 ]   [ c1*a2+d1*c2  c1*b2+d1*d2 ]
+//
 // Elle utilise les entiers temporaires du `matrixState` pour stocker les
-// résultats intermédiaires.
-// La multiplication de matrices 2x2 requiert 8 multiplications d'entiers.
+// résultats intermédiaires des 8 multiplications requises.
 // Celles-ci sont parallélisées si `useParallel` est vrai et que la taille
 // des nombres dépasse `parallelThreshold`.
 func multiplyMatrices(dest, m1, m2 *matrix, s *matrixState, useParallel bool) {
@@ -493,24 +562,28 @@ func multiplyMatrices(dest, m1, m2 *matrix, s *matrixState, useParallel bool) {
 }
 
 // CalculateCore exécute le cœur de l'algorithme pour F(n) via l'exponentiation matricielle.
-// La logique du "fast path" est gérée par le FibCalculator qui l'enveloppe.
+// La logique du "fast path" (n <= 93) est gérée par le FibCalculator qui l'enveloppe.
 func (me *MatrixExponentiation) CalculateCore(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error) {
-	// La vérification n=0 est gérée par le fast path.
-	// La logique de base ici suppose n > 0.
+	// La vérification n=0 est gérée par le fast path. Pour la formule matricielle,
+	// on calcule Q^(n-1).
 	s := getMatrixState()
 	defer putMatrixState(s)
 
-	k := n - 1 // On doit calculer Q^(n-1)
+	k := n - 1 // L'exposant est n-1.
 	numBits := bits.Len64(k)
 	invNumBits := 1.0 / float64(numBits)
 	useParallel := runtime.NumCPU() > 1
+
 	// `tempMatrix` est nécessaire pour stocker le résultat d'une multiplication
 	// avant de l'assigner à la matrice de destination, pour éviter de corrompre
 	// les données sources en cours de calcul (ex: p = p * p).
 	tempMatrix := &matrix{new(big.Int), new(big.Int), new(big.Int), new(big.Int)}
 
-	// Algorithme d'exponentiation par carré (binaire)
-	// On parcourt les bits de l'exposant k.
+	// --- Algorithme d'exponentiation par carré (binaire) ---
+	// On parcourt les bits de l'exposant k, du moins significatif (LSB) au plus
+	// significatif (MSB).
+	// `s.res` est notre accumulateur de résultat, initialisé à la matrice identité.
+	// `s.p` est la puissance de la matrice Q, initialisée à Q^1.
 	for i := 0; i < numBits; i++ {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("calculation canceled: %w", ctx.Err())
@@ -519,22 +592,28 @@ func (me *MatrixExponentiation) CalculateCore(ctx context.Context, progressChan 
 			reportProgress(progressChan, float64(i)*invNumBits)
 		}
 
-		// Si le i-ème bit de k est à 1, on multiplie le résultat par la puissance courante de la matrice.
-		// res = res * p
+		// ÉTAPE 1: Test du bit courant.
+		// Si le i-ème bit de k est à 1, on doit inclure la puissance actuelle
+		// de la matrice dans notre résultat final.
+		// Ex: pour k=13 (1101), on le fait pour i=0, i=2, i=3.
 		if (k>>uint(i))&1 == 1 {
+			// res = res * p
 			multiplyMatrices(tempMatrix, s.res, s.p, s, useParallel)
-			s.res.Set(tempMatrix) // Copie du résultat.
+			s.res.Set(tempMatrix) // Copie du résultat dans l'accumulateur.
 		}
 
-		// On met la matrice p au carré pour l'itération suivante.
+		// ÉTAPE 2: Mise au carré pour l'itération suivante.
+		// La matrice p passe de Q^(2^i) à Q^(2^(i+1)).
 		// p = p * p
-		// On utilise la fonction optimisée car p (puissance de Q) est toujours symétrique.
+		// On utilise la fonction optimisée `squareSymmetricMatrix` car p (une
+		// puissance de la matrice symétrique Q) est toujours symétrique.
 		squareSymmetricMatrix(tempMatrix, s.p, s, useParallel)
 		s.p.Set(tempMatrix) // Copie du résultat.
 	}
 
 	reportProgress(progressChan, 1.0)
-	// Le résultat F(n) est le coefficient en haut à gauche de la matrice Q^(n-1).
+	// À la fin, res = Q^(n-1). Le résultat F(n) est le coefficient (0,0)
+	// (en haut à gauche) de cette matrice.
 	return new(big.Int).Set(s.res.a), nil
 }
 
