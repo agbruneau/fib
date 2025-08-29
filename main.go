@@ -1,54 +1,45 @@
-// # Calculateur de Fibonacci Hautes Performances
+// # Calculateur de Fibonacci : Une Étude de Cas en Haute Performance avec Go
 //
-// Bienvenue dans ce programme Go ! Il a été conçu comme un outil pédagogique et
-// une démonstration de performance pour le calcul des nombres de la suite de
-// Fibonacci, en particulier pour des indices `n` extrêmement grands.
+// Ce programme implémente le calcul des nombres de la suite de Fibonacci (F(n))
+// pour des indices `n` arbitrairement grands. Il sert de démonstration pédagogique
+// sur la manière dont des algorithmes mathématiques avancés et des techniques
+// d'optimisation modernes en Go peuvent résoudre des problèmes calculatoirement
+// intensifs.
 //
-// Il met en œuvre deux des algorithmes les plus efficaces connus pour ce problème,
-// tous deux avec une complexité temporelle en O(log n). Cela leur permet de
-// calculer des termes comme F(100,000,000) en quelques secondes seulement, là où
-// un algorithme naïf prendrait un temps inimaginable.
+// ## Principes Fondamentaux et Défis Techniques
 //
-// ## Objectifs Pédagogiques et Techniques
+// 1. **La Complexité Algorithmique : De O(n) à O(log n) :**
+//    L'algorithme itératif est en O(n). Ce programme implémente des algorithmes
+//    en O(log n) opérations arithmétiques : "Fast Doubling" et "Exponentiation Matricielle".
 //
-// 1. **Vulgarisation d'Algorithmes Avancés :**
-//    - **Optimized Fast Doubling :** Une méthode de pointe qui utilise des
-//      identités mathématiques spécifiques à Fibonacci pour doubler l'indice `k`
-//      à chaque étape (calculant F(2k) et F(2k+1) à partir de F(k) et F(k+1)).
-//    - **Exponentiation Matricielle :** Une approche plus générale qui repose sur
-//      le fait que F(n) peut être obtenu en élevant une matrice spécifique à la
-//      puissance `n`.
+// 2. **Le Véritable Goulot d'Étranglement (Coût Binaire) :**
+//    Pour de grands `n`, F(n) a K bits. Le coût réel est O(log n * M(K)), où M(K)
+//    est le coût de la multiplication de deux nombres de K bits. Go utilise des
+//    algorithmes comme Karatsuba (O(K^1.58)). La performance est dominée par ces
+//    multiplications de `big.Int`.
 //
-// 2. **Démonstration d'Optimisations Modernes en Go :**
-//    - **Parallélisme Intelligent :** Le code tire parti des processeurs multi-cœurs
-//      en parallélisant les multiplications de grands nombres (`*big.Int`), qui sont
-//      les opérations les plus coûteuses, mais seulement lorsque c'est rentable.
-//    - **Gestion de la Mémoire "Zéro-Allocation" :** Pour éviter de surcharger le
-//      ramasse-miettes (Garbage Collector) lors des calculs intensifs, le programme
-//      utilise des "pools" d'objets (`sync.Pool`). Les structures de données
-//      temporaires sont recyclées au lieu d'être constamment créées et détruites.
-//    - **Gestion Robuste du Contexte :** L'API `context` de Go est utilisée pour
-//      gérer proprement l'annulation des calculs (par exemple, sur un Ctrl+C de
-//      l'utilisateur) et pour imposer un délai maximum (timeout).
+// ## Stratégies d'Optimisation Implémentées
 //
-// 3. **Conception d'une Interface en Ligne de Commande (CLI) Claire :**
-//    - Le programme fournit une interface simple pour choisir l'algorithme,
-//      spécifier le nombre `n`, activer un mode verbeux et définir un timeout.
-//    - Un mode "comparaison" permet de lancer les deux algorithmes en parallèle
-//      pour vérifier que leurs résultats sont identiques, agissant comme un test
-//      de validité dynamique et un benchmark.
+// 1. **Parallélisme au Niveau des Opérations (Task Parallelism) :**
+//    Les multiplications indépendantes à chaque étape sont exécutées simultanément
+//    sur différents cœurs CPU via des goroutines. Un seuil (`parallelThreshold`)
+//    est utilisé pour s'assurer que le gain dépasse l'overhead de synchronisation.
 //
-// ## Structure du Fichier
+// 2. **Gestion Mémoire "Zéro-Allocation" et Pression GC :**
+//    Utilisation intensive de `sync.Pool` pour recycler les structures de données
+//    (`big.Int`), atteignant une "zéro-allocation" dans le chemin critique et
+//    minimisant l'impact du Garbage Collector (GC).
 //
-// Le code est divisé en deux sections principales pour une meilleure lisibilité,
-// suivant le principe de **séparation des préoccupations** :
+// 3. **Optimisations Algorithmiques Spécifiques :**
+//    - **Fast Path O(1) :** Utilisation d'une Table de Consultation (LUT) pré-calculée
+//      pour n <= 93.
+//    - **Symétrie Matricielle :** Réduction du nombre de multiplications de 8 à 4
+//      lors de la mise au carré des matrices de Fibonacci.
 //
-// - **SECTION 1: MOTEURS DE CALCUL FIBONACCI :** Contient la logique pure des
-//   algorithmes. C'est le cœur mathématique du programme, entièrement découplé
-//   de l'interface utilisateur.
-// - **SECTION 2: LOGIQUE DE L'APPLICATION :** Gère l'interface en ligne de
-//   commande, l'affichage de la progression, l'interprétation des résultats et
-//   la gestion des erreurs.
+// 4. **Concurrence Robuste et Gestion du Contexte :**
+//    L'API `context` est utilisée pour une gestion propre des annulations (Ctrl+C)
+//    et des timeouts dans un environnement concurrent complexe.
+
 package main
 
 import (
@@ -70,198 +61,142 @@ import (
 )
 
 // ----------------------------------------------------------------------------
-// SECTION 1: MOTEURS DE CALCUL FIBONACCI (Logique pure, hautement optimisée)
+// SECTION 1: MOTEURS DE CALCUL FIBONACCI (Théorie et Implémentation Optimisée)
 // ----------------------------------------------------------------------------
 
 const (
-	// MaxFibUint64 est l'index N le plus élevé pour lequel le résultat F(N) peut
-	// être contenu dans un entier non signé de 64 bits (`uint64`).
-	// F(93) est le dernier de la série qui ne dépasse pas 2^64 - 1.
-	// Au-delà de cet index, l'utilisation de `math/big.Int` est indispensable
-	// pour gérer des nombres arbitrairement grands. Le fait de stocker cette
-	// valeur en constante permet une optimisation cruciale ("fast path").
+	// MaxFibUint64 est l'index N maximal pour lequel F(N) peut être représenté
+	// par un `uint64`. F(93) est le dernier.
 	MaxFibUint64 = 93
 
-	// parallelThreshold définit la taille minimale (en nombre de bits) d'un
-	// grand nombre (`big.Int`) au-delà de laquelle la parallélisation de sa
-	// multiplication devient rentable.
-	// En dessous de ce seuil, le coût de la création de goroutines et de la
-	// synchronisation ("overhead") est supérieur au gain de temps du calcul
-	// parallèle. Cette valeur a été déterminée empiriquement par des benchmarks.
-	parallelThreshold = 2048
+	// DefaultParallelThreshold est le seuil par défaut (en nombre de bits)
+	// au-delà duquel la parallélisation des multiplications de `big.Int` est activée.
+	// Concept Clé : Overhead vs Gain. Si le calcul est rapide (nombres petits),
+	// l'overhead de création des goroutines et de synchronisation dépasse le gain.
+	DefaultParallelThreshold = 2048
 )
 
-// Calculator est une interface qui définit un "contrat" pour tout algorithme
-// de calcul de Fibonacci. L'utilisation d'une interface est un exemple de
-// **polymorphisme** en Go. Elle permet à la logique de l'application (Section 2)
-// de traiter indifféremment les différentes implémentations (Fast Doubling,
-// Matrix Exponentiation, etc.), les rendant interchangeables et extensibles.
+// --- Optimisation O(1) : Fast Path avec Lookup Table (LUT) ---
+
+// fibLookupTable stocke les valeurs pré-calculées de F(0) à F(93).
+// Nous stockons des pointeurs `*big.Int` pour correspondre au type de retour attendu.
+var fibLookupTable [MaxFibUint64 + 1]*big.Int
+
+// init est une fonction spéciale en Go, exécutée automatiquement avant main().
+// Elle initialise la LUT de manière itérative (O(N)). Ce coût est payé une seule
+// fois au démarrage du programme.
+func init() {
+	// Calcul itératif en utilisant l'arithmétique uint64 native pour la performance.
+	var a, b uint64 = 0, 1
+	for i := uint64(0); i <= MaxFibUint64; i++ {
+		fibLookupTable[i] = new(big.Int).SetUint64(a)
+		a, b = b, a+b
+	}
+}
+
+// lookupSmall récupère le résultat depuis le cache LUT en O(1).
+func lookupSmall(n uint64) *big.Int {
+	// IMPORTANT : Nous retournons une COPIE de la valeur de la LUT.
+	// Cela garantit l'immuabilité du cache, évitant que l'appelant ne modifie
+	// les valeurs pré-calculées, ce qui causerait des bugs en accès concurrent.
+	return new(big.Int).Set(fibLookupTable[n])
+}
+
+// --- Abstraction et Polymorphisme ---
+
+// Calculator définit l'interface standard pour tout algorithme de Fibonacci.
+// L'utilisation d'interfaces permet le polymorphisme.
 type Calculator interface {
-	// Calculate est la méthode principale qui effectue le calcul pour un n donné.
-	// - ctx: Le contexte permet de gérer l'annulation (timeout, signal utilisateur).
-	// - progressChan: Un canal optionnel pour envoyer des mises à jour de la progression (de 0.0 à 1.0).
-	// - n: L'index dans la suite de Fibonacci à calculer.
-	Calculate(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error)
-
-	// Name retourne le nom descriptif de l'algorithme.
+	// Calculate effectue le calcul F(n).
+	// Le paramètre `threshold` est ajouté pour permettre l'ajustement dynamique du seuil de parallélisme.
+	Calculate(ctx context.Context, progressChan chan<- float64, n uint64, threshold int) (*big.Int, error)
 	Name() string
 }
 
-// coreCalculator est une interface interne qui représente le cœur d'un
-// algorithme de Fibonacci, sans la logique commune (comme le "fast path"
-// pour les petits `n` ou d'autres optimisations partagées).
+// coreCalculator est une interface interne représentant le cœur algorithmique.
 type coreCalculator interface {
-	CalculateCore(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error)
+	CalculateCore(ctx context.Context, progressChan chan<- float64, n uint64, threshold int) (*big.Int, error)
 	Name() string
 }
 
-// FibCalculator est une structure qui met en œuvre le **Design Pattern Décorateur**.
-// Il "décore" un `coreCalculator` en lui ajoutant des fonctionnalités communes,
-// comme l'optimisation "fast path" pour les petits nombres.
-//
-// Cela évite la duplication de code : au lieu de réimplémenter la logique du
-// "fast path" dans chaque algorithme, on l'implémente une seule fois ici.
-// Le `FibCalculator` expose l'interface publique `Calculator`.
+// FibCalculator implémente le **Design Pattern Décorateur**.
+// Il "enveloppe" un `coreCalculator` et lui ajoute des fonctionnalités transversales
+// (le "fast path" O(1)), respectant ainsi le principe de Responsabilité Unique (SRP).
 type FibCalculator struct {
 	core coreCalculator
 }
 
-// Name retourne le nom du calculateur de cœur.
 func (c *FibCalculator) Name() string {
 	return c.core.Name()
 }
 
-// Calculate exécute le calcul. Il gère d'abord le cas rapide (n <= 93)
-// et délègue au calculateur de cœur pour les grands nombres.
-func (c *FibCalculator) Calculate(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error) {
+// Calculate est le point d'entrée unifié. Il agit comme un dispatcher.
+func (c *FibCalculator) Calculate(ctx context.Context, progressChan chan<- float64, n uint64, threshold int) (*big.Int, error) {
+	// OPTIMISATION : Fast Path O(1)
 	if n <= MaxFibUint64 {
 		reportProgress(progressChan, 1.0)
-		return calculateSmall(n), nil
+		return lookupSmall(n), nil
 	}
-	return c.core.CalculateCore(ctx, progressChan, n)
+
+	// Cas complexe : Délégation au calculateur de cœur O(log n).
+	return c.core.CalculateCore(ctx, progressChan, n, threshold)
 }
 
-// reportProgress envoie une valeur de progression dans le canal `progressChan`
-// sans jamais bloquer l'exécution.
-// Si le canal est plein (parce que le récepteur est lent), la mise à jour est
-// simplement ignorée. Ceci est crucial pour ne pas ralentir le calcul lui-même.
-// L'instruction `select` avec une clause `default` est l'idiome Go classique
-// pour un envoi non bloquant sur un canal.
+// reportProgress effectue un envoi non bloquant sur le canal de progression.
+// Concept Clé : Communication Concurrente Non Bloquante.
+// L'idiome `select` avec `default` garantit que si le récepteur (l'interface
+// utilisateur) est lent, la mise à jour est ignorée au lieu de bloquer la
+// goroutine de calcul.
 func reportProgress(progressChan chan<- float64, progress float64) {
 	if progressChan == nil {
 		return
 	}
 	select {
 	case progressChan <- progress:
-	default: // Ne fait rien si le canal n'est pas prêt à recevoir.
+	default: // Canal plein ou non prêt. On ignore la mise à jour.
 	}
 }
 
-// calculateSmall est une fonction d'optimisation (fast path) pour les "petits"
-// nombres de Fibonacci (n <= 93), ceux dont le résultat tient dans un `uint64`.
-// Pour ces cas, un simple algorithme itératif est beaucoup plus rapide que les
-// algorithmes complexes (log n) car il n'implique pas la surcharge liée à
-// l'allocation de mémoire pour les `big.Int` ou à la complexité de l'algorithme.
-func calculateSmall(n uint64) *big.Int {
-	if n == 0 {
-		return big.NewInt(0)
-	}
-	// Itération classique pour calculer F(n).
-	var a, b uint64 = 0, 1
-	for i := uint64(1); i < n; i++ {
-		a, b = b, a+b // L'assignation multiple évite une variable temporaire.
-	}
-	// Le résultat est converti en `*big.Int` pour correspondre au type de
-	// retour de l'interface `Calculator`.
-	return new(big.Int).SetUint64(b)
-}
-
 // ----------------------------------------------------------------------------
-// IMPLÉMENTATION 1: ALGORITHME "OPTIMIZED FAST DOUBLING"
+// IMPLÉMENTATION 1: ALGORITHME "OPTIMIZED FAST DOUBLING" (O(log n))
 // ----------------------------------------------------------------------------
 //
-// Le "Fast Doubling" est l'un des algorithmes les plus rapides connus pour le
-// calcul de F(n), avec une complexité en O(log n). Il est généralement plus
-// performant que l'exponentiation matricielle car il effectue moins de
-// multiplications de grands nombres à chaque étape.
+// Le "Fast Doubling" est généralement l'algorithme le plus rapide en pratique.
 //
-// 1. LE PRINCIPE MATHÉMATIQUE
-// ----------------------------
-// L'algorithme s'appuie sur une paire d'identités mathématiques qui permettent
-// de "sauter" directement de F(k) à F(2k) dans la suite :
+// ## Fondements Mathématiques
 //
-//   F(2k)   = F(k) * [2*F(k+1) - F(k)]
-//   F(2k+1) = F(k+1)^2 + F(k)^2
+// L'algorithme repose sur les identités suivantes :
 //
-// La preuve de ces identités découle des propriétés de la matrice de Fibonacci
-// ou peut être démontrée par induction.
+// 1. **F(2k)   = F(k) * [2*F(k+1) - F(k)]**
+// 2. **F(2k+1) = F(k+1)² + F(k)²**
 //
-// 2. LA LOGIQUE DE L'ALGORITHME
-// -----------------------------
-// L'idée est de traiter `n` en lisant sa représentation binaire, du bit le plus
-// significatif (MSB) vers le moins significatif (LSB). On maintient à chaque
-// étape le couple (F(k), F(k+1)).
+// Cela permet de calculer (F(2k), F(2k+1)) à partir de (F(k), F(k+1)) en seulement
+// 3 multiplications distinctes.
 //
-// On commence avec k=0, donc le couple (F(0), F(1)) = (0, 1).
-// Pour chaque bit de `n` (de gauche à droite) :
+// ## Logique de l'Algorithme (Itération Binaire Top-Down)
 //
-//   a) On applique systématiquement les formules de "doubling".
-//      L'état (F(k), F(k+1)) devient (F(2k), F(2k+1)).
-//
-//   b) Si le bit de `n` est 1, cela signifie que notre cible est impaire. On doit
-//      donc avancer d'un pas supplémentaire.
-//      L'état (F(2k), F(2k+1)) devient (F(2k+1), F(2k+2)).
-//      Note: F(2k+2) = F(2k+1) + F(2k), donc ce calcul est simple.
-//
-// Exemple pour n = 13 (binaire 1101):
-//
-// 1. **Bit 1 (MSB):** n=1. État initial (F(0), F(1)) = (0, 1).
-//    - Doubling: (F(0),F(1)) -> (F(0),F(1)). (Pas de changement car k=0)
-//    - Bit est 1: (F(0),F(1)) -> (F(1),F(2)) = (1, 1).
-//    => k=1, on a (F(1), F(2)).
-//
-// 2. **Bit 1:** n=3. État actuel (F(1), F(2)) = (1, 1).
-//    - Doubling: (F(1),F(2)) -> (F(2),F(3)) = (1, 2).
-//    - Bit est 1: (F(2),F(3)) -> (F(3),F(4)) = (2, 3).
-//    => k=3, on a (F(3), F(4)).
-//
-// 3. **Bit 0:** n=6. État actuel (F(3), F(4)) = (2, 3).
-//    - Doubling: (F(3),F(4)) -> (F(6),F(7)) = (8, 13).
-//    - Bit est 0: Pas d'action supplémentaire.
-//    => k=6, on a (F(6), F(7)).
-//
-// 4. **Bit 1 (LSB):** n=13. État actuel (F(6), F(7)) = (8, 13).
-//    - Doubling: (F(6),F(7)) -> (F(12),F(13)) = (144, 233).
-//    - Bit est 1: (F(12),F(13)) -> (F(13),F(14)) = (233, 377).
-//    => k=13, on a (F(13), F(14)).
-//
-// Le résultat final est F(13), qui est le premier élément du couple : 233.
-// Le code ci-dessous implémente cette logique de manière optimisée.
+// On parcourt la représentation binaire de `n` du MSB vers le LSB.
+// On maintient un état (F(k), F(k+1)).
+// Pour chaque bit :
+// 1. **Doubling :** L'état passe à (F(2k), F(2k+1)).
+// 2. **Addition :** Si le bit est 1, l'état passe à (F(2k+1), F(2k+2)).
 
-// calculationState contient tous les grands entiers nécessaires pour une passe
-// de l'algorithme Fast Doubling.
-// Le fait de regrouper ces valeurs dans une structure permet de les recycler
-// facilement via un `sync.Pool`. Cette technique de "pooling" est une
-// optimisation mémoire essentielle pour les applications à haute performance
-// en Go, car elle réduit la pression sur le ramasse-miettes (GC).
-// f_k:  Stocke F(k)
-// f_k1: Stocke F(k+1)
-// t1-t4: Nombres temporaires réutilisables pour les calculs intermédiaires.
+// --- Optimisation Mémoire : Pooling et Zéro-Allocation ---
+
+// calculationState regroupe tous les `big.Int` nécessaires pour une itération.
 type calculationState struct {
-	f_k, f_k1, t1, t2, t3, t4 *big.Int
+	f_k, f_k1      *big.Int // F(k), F(k+1)
+	t1, t2, t3, t4 *big.Int // Variables temporaires
 }
 
-// statePool est un "pool" d'objets `calculationState`.
-// `sync.Pool` est un cache mémoire thread-safe fourni par Go. Il permet de
-// réutiliser des objets qui ne sont plus utilisés au lieu de les laisser au
-// ramasse-miettes (GC) et d'en allouer de nouveaux.
-// C'est une optimisation critique pour les fonctions appelées fréquemment ou
-// manipulant des objets lourds, comme c'est le cas ici avec les `big.Int`.
+// statePool est une implémentation de `sync.Pool`.
+// Concept Clé : Réduction de la Pression sur le Garbage Collector (GC).
+// `sync.Pool` est un cache d'objets thread-safe. Au lieu d'allouer et de laisser
+// le GC nettoyer ces objets coûteux, nous les réutilisons.
 var statePool = sync.Pool{
-	// La fonction New est appelée par le pool si aucun objet n'est disponible.
-	// Elle crée une nouvelle instance de `calculationState` avec tous les
-	// `big.Int` déjà initialisés, prêts à l'emploi.
+	// La fonction New est appelée lorsque le pool est vide.
 	New: func() interface{} {
+		// Allocation initiale des objets `big.Int`.
 		return &calculationState{
 			f_k: new(big.Int), f_k1: new(big.Int),
 			t1: new(big.Int), t2: new(big.Int),
@@ -270,201 +205,148 @@ var statePool = sync.Pool{
 	},
 }
 
-// getState récupère un `calculationState` depuis le pool.
-// Il réinitialise les valeurs initiales de la suite, F(0)=0 et F(1)=1,
-// pour que le calcul puisse commencer.
+// getState récupère un état depuis le pool et l'initialise (F(0)=0, F(1)=1).
 func getState() *calculationState {
 	s := statePool.Get().(*calculationState)
-	s.f_k.SetInt64(0)  // F(0)
-	s.f_k1.SetInt64(1) // F(1)
+	s.f_k.SetInt64(0)
+	s.f_k1.SetInt64(1)
 	return s
 }
 
-// putState remet un `calculationState` dans le pool une fois qu'il n'est
-// plus utilisé, le rendant disponible pour un prochain calcul.
+// putState retourne l'état au pool.
 func putState(s *calculationState) {
 	statePool.Put(s)
 }
 
-// OptimizedFastDoubling est l'implémentation de l'interface Calculator.
+// OptimizedFastDoubling est la structure implémentant l'algorithme.
 type OptimizedFastDoubling struct{}
 
-// Name retourne le nom de l'algorithme, incluant les optimisations clés.
 func (fd *OptimizedFastDoubling) Name() string {
-	return "OptimizedFastDoubling (3-Way-Parallel+ZeroAlloc)"
+	return "OptimizedFastDoubling (3-Way-Parallel+ZeroAlloc+LUT)"
 }
 
-// CalculateCore exécute le cœur de l'algorithme Fast Doubling pour F(n).
-// La logique du "fast path" est gérée par le FibCalculator qui l'enveloppe.
-func (fd *OptimizedFastDoubling) CalculateCore(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error) {
-	// Récupération d'un état depuis le pool. `defer` garantit qu'il sera
-	// retourné au pool à la fin de la fonction, même en cas d'erreur.
+// CalculateCore est le cœur de l'implémentation du Fast Doubling.
+func (fd *OptimizedFastDoubling) CalculateCore(ctx context.Context, progressChan chan<- float64, n uint64, threshold int) (*big.Int, error) {
+	// Récupération d'un état recyclé. `defer` garantit son retour au pool.
 	s := getState()
 	defer putState(s)
 
-	numBits := bits.Len64(n) // Nombre de bits dans la représentation binaire de n.
+	// Pré-calcul pour la boucle.
+	numBits := bits.Len64(n) // Nombre d'itérations O(log n).
 	invNumBits := 1.0 / float64(numBits)
+
+	// Configuration du parallélisme.
 	var wg sync.WaitGroup
+	// Le parallélisme n'est activé que si le CPU a plus d'un cœur logique.
 	useParallel := runtime.NumCPU() > 1
 
-	// Boucle sur les bits de n, du plus significatif (MSB) au moins significatif (LSB).
+	// Boucle principale : Parcours des bits de n (MSB vers LSB).
 	for i := numBits - 1; i >= 0; i-- {
-		// Vérification de l'annulation du contexte (timeout ou Ctrl+C).
+
+		// --- Gestion de l'Annulation ---
+		// Vérification proactive du contexte à chaque itération.
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("calculation canceled: %w", ctx.Err())
 		}
+		// Rapport de progression (non bloquant).
 		if progressChan != nil && i < numBits-1 {
 			reportProgress(progressChan, float64(numBits-1-i)*invNumBits)
 		}
 
-		// --- Étape de "Doubling" ---
-		// Calcule F(2k) et F(2k+1) à partir de F(k) et F(k+1).
-		// F(2k)   = F(k) * (2*F(k+1) - F(k))
-		// F(2k+1) = F(k+1)^2 + F(k)^2
+		// --- Étape 1: Doubling (Calcul de F(2k) et F(2k+1)) ---
 
-		// Calcul de (2*F(k+1) - F(k))
-		s.t2.Lsh(s.f_k1, 1)    // t2 = F(k+1) * 2
+		// 1.1 Calcul du terme commun : (2*F(k+1) - F(k))
+		s.t2.Lsh(s.f_k1, 1)   // t2 = F(k+1) * 2 (Décalage de bit efficace)
 		s.t2.Sub(s.t2, s.f_k) // t2 = 2*F(k+1) - F(k)
 
-		// Les trois multiplications suivantes sont les opérations les plus coûteuses.
-		// Si les nombres sont assez grands et que plusieurs cœurs CPU sont
-		// disponibles, elles sont exécutées en parallèle.
-		if useParallel && s.f_k1.BitLen() > parallelThreshold {
+		// 1.2 Calcul des 3 multiplications indépendantes :
+		// A. F(k) * t2
+		// B. F(k+1)²
+		// C. F(k)²
+
+		// OPTIMISATION : Parallélisme Conditionnel (Task Parallelism)
+		if useParallel && s.f_k1.BitLen() > threshold {
+			// Lancement de 3 goroutines (Fan-out).
 			wg.Add(3)
-			// t3 = F(k) * t2  (le futur F(2k))
-			go func(dest, src1, src2 *big.Int) { defer wg.Done(); dest.Mul(src1, src2) }(s.t3, s.f_k, s.t2)
-			// t1 = F(k+1)^2
-			go func(dest, src *big.Int) { defer wg.Done(); dest.Mul(src, src) }(s.t1, s.f_k1)
-			// t4 = F(k)^2
-			go func(dest, src *big.Int) { defer wg.Done(); dest.Mul(src, src) }(s.t4, s.f_k)
-			wg.Wait() // Attente de la fin des 3 multiplications.
-			s.f_k.Set(s.t3)            // f_k devient F(2k)
-			s.f_k1.Add(s.t1, s.t4)     // f_k1 devient F(k+1)^2 + F(k)^2 = F(2k+1)
+
+			// Goroutine A
+			go func(dest, src1, src2 *big.Int) {
+				defer wg.Done()
+				dest.Mul(src1, src2)
+			}(s.t3, s.f_k, s.t2) // t3 = F(k) * t2
+
+			// Goroutine B
+			go func(dest, src *big.Int) {
+				defer wg.Done()
+				dest.Mul(src, src)
+			}(s.t1, s.f_k1) // t1 = F(k+1)²
+
+			// Goroutine C
+			go func(dest, src *big.Int) {
+				defer wg.Done()
+				dest.Mul(src, src)
+			}(s.t4, s.f_k) // t4 = F(k)²
+
+			// Point de synchronisation (Barrière / Fan-in).
+			wg.Wait()
+
+			// Assemblage final.
+			s.f_k.Set(s.t3)        // f_k devient F(2k)
+			s.f_k1.Add(s.t1, s.t4) // f_k1 devient F(2k+1)
+
 		} else {
-			// Exécution séquentielle pour les nombres plus petits.
-			s.t3.Mul(s.f_k, s.t2)      // t3 = F(k) * (2*F(k+1) - F(k))
-			s.t1.Mul(s.f_k1, s.f_k1)   // t1 = F(k+1)^2
-			s.t4.Mul(s.f_k, s.f_k)     // t4 = F(k)^2
-			s.f_k.Set(s.t3)            // f_k devient F(2k)
-			s.f_k1.Add(s.t1, s.t4)     // f_k1 devient F(2k+1)
+			// Exécution séquentielle.
+			s.t3.Mul(s.f_k, s.t2)
+			s.t1.Mul(s.f_k1, s.f_k1)
+			s.t4.Mul(s.f_k, s.f_k)
+			s.f_k.Set(s.t3)
+			s.f_k1.Add(s.t1, s.t4)
 		}
 
-		// --- Étape d'"Addition" ---
-		// Si le i-ème bit de n est 1, on doit avancer l'état de F(2k) à F(2k+1).
-		// L'état (F(k), F(k+1)) devient (F(k+1), F(k) + F(k+1)).
+		// --- Étape 2: Addition Conditionnelle ---
+		// Si le i-ème bit de n est 1, nous devons avancer l'état d'un cran.
 		if (n>>uint(i))&1 == 1 {
-			// Avant : f_k = F(2k), f_k1 = F(2k+1)
-			s.t1.Set(s.f_k1)               // t1 sauvegarde F(2k+1)
-			s.f_k1.Add(s.f_k1, s.f_k)      // f_k1 = F(2k+1) + F(2k) = F(2k+2)
-			s.f_k.Set(s.t1)                // f_k = t1 = F(2k+1)
-			// Après : f_k = F(2k+1), f_k1 = F(2k+2)
+			// (F(k), F(k+1)) devient (F(k+1), F(k)+F(k+1)).
+			s.t1.Set(s.f_k1)
+			s.f_k1.Add(s.f_k1, s.f_k)
+			s.f_k.Set(s.t1)
 		}
 	}
 
 	reportProgress(progressChan, 1.0)
-	// Le résultat final est F(n), qui se trouve dans f_k.
+	// Le résultat F(n) est dans f_k. Nous retournons une copie car l'original
+	// sera retourné au pool et potentiellement modifié par un autre calcul.
 	return new(big.Int).Set(s.f_k), nil
 }
 
 // ----------------------------------------------------------------------------
-// IMPLÉMENTATION 2: ALGORITHME D'EXPONENTIATION MATRICIELLE
+// IMPLÉMENTATION 2: ALGORITHME D'EXPONENTIATION MATRICIELLE (O(log n))
 // ----------------------------------------------------------------------------
 //
-// Cette approche, de complexité O(log n), est une méthode élégante qui utilise
-// l'algèbre linéaire pour calculer les nombres de Fibonacci. Elle est souvent un
-// peu moins performante que le "Fast Doubling" en pratique à cause d'un plus
-// grand nombre de multiplications, mais elle reste un exemple classique et
-// puissant de la façon dont un problème récursif peut être transformé en un
-// problème d'exponentiation.
+// Cette approche utilise l'algèbre linéaire. Elle est basée sur la matrice de
+// Fibonacci Q = [[1, 1], [1, 0]]. L'identité clé est que Q^n contient F(n).
 //
-// 1. LE PRINCIPE MATHÉMATIQUE : LA MATRICE DE FIBONACCI
-// ---------------------------------------------------------
-// La relation de récurrence F(n+1) = F(n) + F(n-1) peut être exprimée sous
-// forme matricielle. L'idée est de trouver une matrice 2x2, appelée Q, qui,
-// lorsqu'elle est multipliée par un vecteur contenant deux termes consécutifs
-// de la suite, nous donne le vecteur des deux termes suivants.
+// ## Algorithme : Exponentiation par Carré (Binary Exponentiation)
 //
-// On cherche à passer de [ F(n), F(n-1) ] à [ F(n+1), F(n) ].
+// On calcule Q^n en O(log n) étapes en décomposant n en binaire (ex: Q^13 = Q^8 * Q^4 * Q^1).
 //
-//  [ F(n+1) ] = [ F(n) + F(n-1) ]
-//  [ F(n)   ] = [ F(n)          ]
+// ## Optimisation Spécifique : La Symétrie
 //
-// Ceci peut se réécrire comme une multiplication de matrice :
-//
-//  [ F(n+1) ]   [ 1  1 ] [ F(n)   ]
-//  [        ] = [      ] [        ]
-//  [ F(n)   ]   [ 1  0 ] [ F(n-1) ]
-//
-// La matrice Q = [[1, 1], [1, 0]] est la "matrice de Fibonacci".
-//
-// En appliquant cette transformation n fois à partir de l'état initial [F(1), F(0)] = [1, 0],
-// on obtient une formule générale :
-//
-//  [ F(n+1)  F(n)   ]   [ 1  1 ]^n   (soit Q^n)
-//  [                ] = [      ]
-//  [ F(n)    F(n-1) ]   [ 1  0 ]
-//
-// Pour calculer F(n), il nous suffit donc d'élever la matrice Q à la puissance n.
-// Le résultat F(n) sera le coefficient en haut à droite (ou en bas à gauche) de la matrice résultante.
-// Note : ce programme calcule Q^(n-1) et prend le coefficient en haut à gauche, ce qui est équivalent.
-//
-//
-// 2. L'OPTIMISATION : L'EXPONENTIATION PAR CARRÉ (BINARY EXPONENTIATION)
-// ---------------------------------------------------------------------
-// Calculer Q^n en multipliant Q par lui-même n-1 fois serait inefficace (O(n)).
-// On utilise plutôt l'exponentiation par carré, un algorithme en O(log n).
-//
-// L'idée est de décomposer l'exposant `n` en sa représentation binaire.
-// Par exemple, pour calculer x^13 :
-// L'exposant 13 en binaire est 1101 (8 + 4 + 0 + 1).
-// Donc, x^13 = x^(8+4+1) = x^8 * x^4 * x^1.
-//
-// L'algorithme fonctionne ainsi :
-//   a. On commence avec un résultat (res = 1) et une puissance de x (p = x).
-//   b. On parcourt les bits de l'exposant de droite à gauche.
-//   c. Si le bit est 1, on multiplie le résultat par la puissance courante : res = res * p.
-//   d. On met la puissance au carré pour le bit suivant : p = p * p.
-//
-// Exemple pour x^13 (1101):
-// - bit 0 (1): res = 1 * x^1 = x      | p devient x^2
-// - bit 1 (0): res = x                | p devient x^4
-// - bit 2 (1): res = x * x^4 = x^5    | p devient x^8
-// - bit 3 (1): res = x^5 * x^8 = x^13 | p devient x^16
-//
-// Ce principe s'applique à l'identique pour les matrices. On calcule Q^n en
-// n'effectuant que des multiplications et des mises au carré de matrices.
-//
-//
-// 3. OPTIMISATION SPÉCIFIQUE : LA SYMETRIE DE LA MATRICE
-// ---------------------------------------------------------
-// La matrice Q est symétrique (Q[i,j] = Q[j,i]). Une propriété utile est que
-// le produit de matrices symétriques n'est pas toujours symétrique, mais la
-// *puissance* d'une matrice symétrique l'est toujours.
-//
-// Donc, toutes les matrices `p` (les puissances de Q) dans l'algorithme
-// d'exponentiation seront symétriques. Une matrice symétrique 2x2 a la forme :
-//
-//   [ a  b ]
-//   [ b  d ]
-//
-// La mise au carré d'une telle matrice donne :
-//
-//   [ a^2 + b^2    a*b + b*d ]   [ a^2 + b^2    b*(a+d) ]
-//   [ b*a + d*b    b^2 + d^2 ] = [ b*(a+d)    b^2 + d^2 ]
-//
-// Le calcul de ce carré ne requiert que 4 multiplications (a*a, b*b, d*d, b*(a+d))
-// au lieu des 8 nécessaires pour une multiplication de matrices génériques.
-// Cette optimisation, implémentée dans `squareSymmetricMatrix`, divise presque
-// par deux le coût de chaque étape de mise au carré.
+// Q est symétrique. Toute puissance de Q est symétrique ([[a, b], [b, d]]).
+// La mise au carré ne nécessite que 4 multiplications au lieu de 8 :
+//   [[a²+b², b*(a+d)], [b*(a+d), b²+d²]]
 
-// matrix représente une matrice 2x2 de grands entiers.
-// [ a  b ]
-// [ c  d ]
+// matrix représente une matrice 2x2 de `big.Int`.
 type matrix struct {
-	a, b, c, d *big.Int
+	a, b, c, d *big.Int // [[a, b], [c, d]]
 }
 
-// Set copie les valeurs d'une autre matrice dans la matrice réceptrice (m).
+// newMatrix est une fonction utilitaire pour allouer une nouvelle matrice initialisée.
+func newMatrix() *matrix {
+	return &matrix{new(big.Int), new(big.Int), new(big.Int), new(big.Int)}
+}
+
+// Set copie les valeurs de `other` dans `m`.
 func (m *matrix) Set(other *matrix) {
 	m.a.Set(other.a)
 	m.b.Set(other.b)
@@ -472,39 +354,42 @@ func (m *matrix) Set(other *matrix) {
 	m.d.Set(other.d)
 }
 
-// matrixState contient tous les objets nécessaires pour le calcul par
-// exponentiation matricielle. Comme pour `calculationState`, cette structure
-// est mise en pool avec `sync.Pool` pour recycler la mémoire.
-// res: La matrice résultat, initialisée à la matrice identité.
-// p:   La matrice de Fibonacci [[1,1],[1,0]] qui sera élevée au carré à chaque étape.
-// t1-t8: Entiers temporaires pour les 8 multiplications requises.
+// --- Optimisation Mémoire : Pooling pour les Matrices ---
+
+// matrixState contient toutes les structures nécessaires pour l'algorithme matriciel.
+// OPTIMISATION : `tempMatrix` a été ajoutée ici pour assurer une véritable
+// "zéro-allocation", en évitant son allocation dans CalculateCore.
 type matrixState struct {
-	res, p                         *matrix
+	res        *matrix // Matrice résultat (accumulateur R).
+	p          *matrix // Matrice de puissance courante (P).
+	tempMatrix *matrix // Matrice temporaire pour les calculs intermédiaires.
+
+	// t1-t8: Variables temporaires pour les multiplications.
 	t1, t2, t3, t4, t5, t6, t7, t8 *big.Int
 }
 
-// matrixStatePool est le pool d'objets pour `matrixState`.
 var matrixStatePool = sync.Pool{
 	New: func() interface{} {
-		// Alloue une seule fois tous les big.Int nécessaires.
+		// Allocation initiale de tous les `big.Int` (20 au total).
 		return &matrixState{
-			res: &matrix{new(big.Int), new(big.Int), new(big.Int), new(big.Int)},
-			p:   &matrix{new(big.Int), new(big.Int), new(big.Int), new(big.Int)},
-			t1:  new(big.Int), t2: new(big.Int), t3: new(big.Int), t4: new(big.Int),
+			res:        newMatrix(),
+			p:          newMatrix(),
+			tempMatrix: newMatrix(),
+			t1:         new(big.Int), t2: new(big.Int), t3: new(big.Int), t4: new(big.Int),
 			t5: new(big.Int), t6: new(big.Int), t7: new(big.Int), t8: new(big.Int),
 		}
 	},
 }
 
-// getMatrixState récupère un état depuis le pool et l'initialise.
+// getMatrixState récupère et initialise un état depuis le pool.
 func getMatrixState() *matrixState {
 	s := matrixStatePool.Get().(*matrixState)
-	// res = Matrice Identité I
+	// Initialisation de res à la Matrice Identité I = [[1, 0], [0, 1]].
 	s.res.a.SetInt64(1)
 	s.res.b.SetInt64(0)
 	s.res.c.SetInt64(0)
 	s.res.d.SetInt64(1)
-	// p = Matrice de Fibonacci Q
+	// Initialisation de p à la Matrice Q = [[1, 1], [1, 0]].
 	s.p.a.SetInt64(1)
 	s.p.b.SetInt64(1)
 	s.p.c.SetInt64(1)
@@ -512,90 +397,72 @@ func getMatrixState() *matrixState {
 	return s
 }
 
-// putMatrixState remet un état dans le pool pour réutilisation.
 func putMatrixState(s *matrixState) {
 	matrixStatePool.Put(s)
 }
 
-// MatrixExponentiation est l'implémentation de l'interface Calculator.
+// MatrixExponentiation est la structure implémentant l'algorithme.
 type MatrixExponentiation struct{}
 
-// Name retourne le nom de l'algorithme, incluant les optimisations clés.
 func (me *MatrixExponentiation) Name() string {
-	return "MatrixExponentiation (SymmetricOpt+Parallel+ZeroAlloc)"
+	return "MatrixExponentiation (SymmetricOpt+Parallel+ZeroAlloc+LUT)"
 }
 
-// squareSymmetricMatrix calcule `dest = m * m` où `m` est une matrice symétrique.
-// Une matrice symétrique est de la forme [[a, b], [b, d]]. La mettre au carré
-// résulte en [[a*a+b*b, b*(a+d)], [b*(a+d), b*b+d*d]].
-//
-// Ce calcul peut être effectué avec seulement 4 multiplications de `big.Int` au
-// lieu des 8 requises pour une multiplication de matrices générique, ce qui
-// accélère considérablement le processus. C'est l'optimisation la plus
-// importante de cet algorithme.
-func squareSymmetricMatrix(dest, m *matrix, s *matrixState, useParallel bool) {
+// squareSymmetricMatrix implémente l'optimisation de la mise au carré symétrique (4 multiplications).
+func squareSymmetricMatrix(dest, m *matrix, s *matrixState, useParallel bool, threshold int) {
 	var wg sync.WaitGroup
 
-	// Nous avons besoin de 4 multiplications : a*a, b*b, d*d, et b*(a+d).
-	// Nous utilisons les entiers temporaires du pool `matrixState`.
-	t_a_sq := s.t1
-	t_b_sq := s.t2
-	t_d_sq := s.t3
-	t_b_ad := s.t4
-	t_a_plus_d := s.t5 // Pour la somme intermédiaire a+d
+	// Utilisation des temporaires du pool.
+	t_a_sq := s.t1     // a²
+	t_b_sq := s.t2     // b²
+	t_d_sq := s.t3     // d²
+	t_b_ad := s.t4     // b*(a+d)
+	t_a_plus_d := s.t5 // (a+d)
 
 	t_a_plus_d.Add(m.a, m.d)
 
-	if useParallel && m.a.BitLen() > parallelThreshold {
+	// OPTIMISATION : Parallélisme Conditionnel (4-Way Parallelism)
+	if useParallel && m.a.BitLen() > threshold {
 		wg.Add(4)
-		go func() { defer wg.Done(); t_a_sq.Mul(m.a, m.a) }()         // a^2
-		go func() { defer wg.Done(); t_b_sq.Mul(m.b, m.b) }()         // b^2
-		go func() { defer wg.Done(); t_d_sq.Mul(m.d, m.d) }()         // d^2
-		go func() { defer wg.Done(); t_b_ad.Mul(m.b, t_a_plus_d) }() // b*(a+d)
-		wg.Wait()
+		go func() { defer wg.Done(); t_a_sq.Mul(m.a, m.a) }()
+		go func() { defer wg.Done(); t_b_sq.Mul(m.b, m.b) }()
+		go func() { defer wg.Done(); t_d_sq.Mul(m.d, m.d) }()
+		go func() { defer wg.Done(); t_b_ad.Mul(m.b, t_a_plus_d) }()
+		wg.Wait() // Barrière de synchronisation.
 	} else {
+		// Exécution séquentielle.
 		t_a_sq.Mul(m.a, m.a)
 		t_b_sq.Mul(m.b, m.b)
 		t_d_sq.Mul(m.d, m.d)
 		t_b_ad.Mul(m.b, t_a_plus_d)
 	}
 
-	// Assemblage des coefficients de la matrice finale à partir des résultats.
-	// dest.a = a^2 + b^2
-	dest.a.Add(t_a_sq, t_b_sq)
-	// dest.b = b*(a+d)
-	dest.b.Set(t_b_ad)
-	// dest.c = dest.b car la matrice résultante est aussi symétrique.
-	dest.c.Set(t_b_ad)
-	// dest.d = b^2 + d^2
-	dest.d.Add(t_b_sq, t_d_sq)
+	// Assemblage final.
+	dest.a.Add(t_a_sq, t_b_sq) // a²+b²
+	dest.b.Set(t_b_ad)         // b*(a+d)
+	dest.c.Set(t_b_ad)         // Symétrie : c = b
+	dest.d.Add(t_b_sq, t_d_sq) // b²+d²
 }
 
-// multiplyMatrices effectue la multiplication générique `dest = m1 * m2`.
-//
-// Formule de multiplication pour deux matrices 2x2 :
-//  [ a1  b1 ] * [ a2  b2 ] = [ a1*a2+b1*c2  a1*b2+b1*d2 ]
-//  [ c1  d1 ]   [ c2  d2 ]   [ c1*a2+d1*c2  c1*b2+d1*d2 ]
-//
-// Elle utilise les entiers temporaires du `matrixState` pour stocker les
-// résultats intermédiaires des 8 multiplications requises.
-// Celles-ci sont parallélisées si `useParallel` est vrai et que la taille
-// des nombres dépasse `parallelThreshold`.
-func multiplyMatrices(dest, m1, m2 *matrix, s *matrixState, useParallel bool) {
+// multiplyMatrices effectue la multiplication générique `dest = m1 * m2` (8 multiplications).
+func multiplyMatrices(dest, m1, m2 *matrix, s *matrixState, useParallel bool, threshold int) {
 	var wg sync.WaitGroup
-	if useParallel && m1.a.BitLen() > parallelThreshold {
+
+	// OPTIMISATION : Parallélisme Conditionnel (8-Way Parallelism)
+	if useParallel && m1.a.BitLen() > threshold {
 		wg.Add(8)
-		go func() { defer wg.Done(); s.t1.Mul(m1.a, m2.a) }() // m1.a*m2.a
-		go func() { defer wg.Done(); s.t2.Mul(m1.b, m2.c) }() // m1.b*m2.c
-		go func() { defer wg.Done(); s.t3.Mul(m1.a, m2.b) }() // m1.a*m2.b
-		go func() { defer wg.Done(); s.t4.Mul(m1.b, m2.d) }() // m1.b*m2.d
-		go func() { defer wg.Done(); s.t5.Mul(m1.c, m2.a) }() // m1.c*m2.a
-		go func() { defer wg.Done(); s.t6.Mul(m1.d, m2.c) }() // m1.d*m2.c
-		go func() { defer wg.Done(); s.t7.Mul(m1.c, m2.b) }() // m1.c*m2.b
-		go func() { defer wg.Done(); s.t8.Mul(m1.d, m2.d) }() // m1.d*m2.d
-		wg.Wait()
+		// Lancement des 8 goroutines pour chaque produit partiel.
+		go func() { defer wg.Done(); s.t1.Mul(m1.a, m2.a) }() // a1*a2
+		go func() { defer wg.Done(); s.t2.Mul(m1.b, m2.c) }() // b1*c2
+		go func() { defer wg.Done(); s.t3.Mul(m1.a, m2.b) }() // a1*b2
+		go func() { defer wg.Done(); s.t4.Mul(m1.b, m2.d) }() // b1*d2
+		go func() { defer wg.Done(); s.t5.Mul(m1.c, m2.a) }() // c1*a2
+		go func() { defer wg.Done(); s.t6.Mul(m1.d, m2.c) }() // d1*c2
+		go func() { defer wg.Done(); s.t7.Mul(m1.c, m2.b) }() // c1*b2
+		go func() { defer wg.Done(); s.t8.Mul(m1.d, m2.d) }() // d1*d2
+		wg.Wait()                                             // Barrière de synchronisation.
 	} else {
-		// Exécution séquentielle
+		// Exécution séquentielle.
 		s.t1.Mul(m1.a, m2.a)
 		s.t2.Mul(m1.b, m2.c)
 		s.t3.Mul(m1.a, m2.b)
@@ -605,37 +472,36 @@ func multiplyMatrices(dest, m1, m2 *matrix, s *matrixState, useParallel bool) {
 		s.t7.Mul(m1.c, m2.b)
 		s.t8.Mul(m1.d, m2.d)
 	}
-	// Les 4 additions finales pour obtenir les coefficients de la matrice résultat.
-	dest.a.Add(s.t1, s.t2) // a = t1+t2
-	dest.b.Add(s.t3, s.t4) // b = t3+t4
-	dest.c.Add(s.t5, s.t6) // c = t5+t6
-	dest.d.Add(s.t7, s.t8) // d = t7+t8
+	// Assemblage final (4 additions).
+	dest.a.Add(s.t1, s.t2)
+	dest.b.Add(s.t3, s.t4)
+	dest.c.Add(s.t5, s.t6)
+	dest.d.Add(s.t7, s.t8)
 }
 
-// CalculateCore exécute le cœur de l'algorithme pour F(n) via l'exponentiation matricielle.
-// La logique du "fast path" (n <= 93) est gérée par le FibCalculator qui l'enveloppe.
-func (me *MatrixExponentiation) CalculateCore(ctx context.Context, progressChan chan<- float64, n uint64) (*big.Int, error) {
-	// La vérification n=0 est gérée par le fast path. Pour la formule matricielle,
-	// on calcule Q^(n-1).
+// CalculateCore est le cœur de l'implémentation de l'Exponentiation Matricielle.
+func (me *MatrixExponentiation) CalculateCore(ctx context.Context, progressChan chan<- float64, n uint64, threshold int) (*big.Int, error) {
+	// Pour n>0, on calcule Q^(n-1). Le cas n=0 est géré par le Fast Path.
+	// Bien que le décorateur gère n<=93, on ajoute une sécurité ici pour n=0.
+	if n == 0 {
+		return big.NewInt(0), nil
+	}
+
 	s := getMatrixState()
 	defer putMatrixState(s)
 
-	k := n - 1 // L'exposant est n-1.
+	k := n - 1 // L'exposant cible.
 	numBits := bits.Len64(k)
 	invNumBits := 1.0 / float64(numBits)
 	useParallel := runtime.NumCPU() > 1
 
-	// `tempMatrix` est nécessaire pour stocker le résultat d'une multiplication
-	// avant de l'assigner à la matrice de destination, pour éviter de corrompre
-	// les données sources en cours de calcul (ex: p = p * p).
-	tempMatrix := &matrix{new(big.Int), new(big.Int), new(big.Int), new(big.Int)}
+	// Utilisation de la matrice temporaire issue du pool (Optimisation Zéro-Alloc).
+	tempMatrix := s.tempMatrix
 
-	// --- Algorithme d'exponentiation par carré (binaire) ---
-	// On parcourt les bits de l'exposant k, du moins significatif (LSB) au plus
-	// significatif (MSB).
-	// `s.res` est notre accumulateur de résultat, initialisé à la matrice identité.
-	// `s.p` est la puissance de la matrice Q, initialisée à Q^1.
+	// --- Algorithme d'Exponentiation par Carré (Bottom-Up) ---
+	// Parcours des bits de k (LSB vers MSB).
 	for i := 0; i < numBits; i++ {
+		// Gestion de l'annulation et progression.
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("calculation canceled: %w", ctx.Err())
 		}
@@ -643,107 +509,90 @@ func (me *MatrixExponentiation) CalculateCore(ctx context.Context, progressChan 
 			reportProgress(progressChan, float64(i)*invNumBits)
 		}
 
-		// ÉTAPE 1: Test du bit courant.
-		// Si le i-ème bit de k est à 1, on doit inclure la puissance actuelle
-		// de la matrice dans notre résultat final.
-		// Ex: pour k=13 (1101), on le fait pour i=0, i=2, i=3.
+		// ÉTAPE 1: Multiplication conditionnelle (Si le bit est 1).
+		// res = res * p
 		if (k>>uint(i))&1 == 1 {
-			// res = res * p
-			multiplyMatrices(tempMatrix, s.res, s.p, s, useParallel)
+			multiplyMatrices(tempMatrix, s.res, s.p, s, useParallel, threshold)
 			s.res.Set(tempMatrix) // Copie du résultat dans l'accumulateur.
 		}
 
 		// ÉTAPE 2: Mise au carré pour l'itération suivante.
-		// La matrice p passe de Q^(2^i) à Q^(2^(i+1)).
-		// p = p * p
-		// On utilise la fonction optimisée `squareSymmetricMatrix` car p (une
-		// puissance de la matrice symétrique Q) est toujours symétrique.
-		squareSymmetricMatrix(tempMatrix, s.p, s, useParallel)
-		s.p.Set(tempMatrix) // Copie du résultat.
+		// p = p * p (Passe de Q^(2^i) à Q^(2^(i+1)))
+		// Utilisation de l'optimisation symétrique.
+		squareSymmetricMatrix(tempMatrix, s.p, s, useParallel, threshold)
+		s.p.Set(tempMatrix)
 	}
 
 	reportProgress(progressChan, 1.0)
-	// À la fin, res = Q^(n-1). Le résultat F(n) est le coefficient (0,0)
-	// (en haut à gauche) de cette matrice.
+	// À la fin, res = Q^(n-1). F(n) est le coefficient (0,0).
+	// Retourne une copie.
 	return new(big.Int).Set(s.res.a), nil
 }
 
 // ----------------------------------------------------------------------------
-// SECTION 2: LOGIQUE DE L'APPLICATION (Interface en ligne de commande)
+// SECTION 2: LOGIQUE DE L'APPLICATION (CLI, Orchestration et Concurrence)
 // ----------------------------------------------------------------------------
 //
-// Cette section illustre le principe de **séparation des préoccupations**.
-// Elle contient tout le code qui n'est PAS directement lié aux algorithmes
-// de Fibonacci eux-mêmes. Sa responsabilité est de gérer l'interaction avec
-// l'utilisateur, la configuration, l'orchestration des calculs et l'affichage
-// des résultats. Le "moteur" (Section 1) pourrait ainsi être réutilisé dans
-// une autre application (ex: un service web) sans modification.
+// Cette section illustre le principe de **Séparation des Préoccupations (SoC)**.
+// Elle gère l'interface utilisateur et l'orchestration, en restant découplée
+// des moteurs de calcul (Section 1).
 
-// Définition des codes de sortie du programme, pour une utilisation dans des scripts.
+// Codes de sortie standards pour l'intégration système.
 const (
-	ExitSuccess       = 0   // Le programme s'est terminé avec succès.
-	ExitErrorGeneric  = 1   // Erreur générique (ex: mauvais argument).
-	ExitErrorTimeout  = 2   // Le calcul a dépassé le délai imparti.
-	ExitErrorCanceled = 130 // Le calcul a été annulé par l'utilisateur (Ctrl+C). Convention shell.
-	ExitErrorMismatch = 3   // En mode comparaison, les résultats des algorithmes ne correspondent pas.
+	ExitSuccess       = 0
+	ExitErrorGeneric  = 1   // Erreur de configuration ou interne.
+	ExitErrorTimeout  = 2   // Délai dépassé.
+	ExitErrorCanceled = 130 // Annulation par l'utilisateur (Ctrl+C), convention shell.
+	ExitErrorMismatch = 3   // Incohérence des résultats en mode comparaison.
 )
 
-// AppConfig regroupe tous les paramètres de configuration de l'application
-// issus de la ligne de commande. Utiliser une structure rend le passage de
-// configuration entre les fonctions plus propre et plus lisible.
+// AppConfig regroupe les paramètres de l'application.
 type AppConfig struct {
-	N       uint64        // L'indice du nombre de Fibonacci à calculer.
-	Verbose bool          // Si vrai, affiche le nombre complet.
-	Timeout time.Duration // Délai maximum pour le calcul.
-	Algo    string        // Nom de l'algorithme à utiliser ('fast', 'matrix', ou 'all').
+	N         uint64
+	Verbose   bool
+	Timeout   time.Duration
+	Algo      string
+	Threshold int // Seuil de parallélisme configurable.
 }
 
-// ProgressUpdate est utilisée par le mode comparaison pour rapporter la
-// progression de chaque calculateur individuel à un gestionnaire central.
-// Elle contient l'identifiant du calculateur et sa valeur de progression.
+// ProgressUpdate structure utilisée pour la communication concurrente de la progression.
 type ProgressUpdate struct {
-	CalculatorIndex int     // Index du calculateur dans la liste.
-	Value           float64 // Progression (0.0 à 1.0).
+	CalculatorIndex int
+	Value           float64
 }
 
-// calculatorRegistry centralise la liste des algorithmes de calcul disponibles.
-// L'utilisation d'un registre (une map) rend le programme **extensible**.
-// Pour ajouter un nouvel algorithme, il suffit de l'ajouter à cette map,
-// sans modifier la logique d'orchestration.
+// calculatorRegistry centralise les algorithmes disponibles (Extensibilité).
 var calculatorRegistry = map[string]Calculator{
 	"fast":   &FibCalculator{core: &OptimizedFastDoubling{}},
 	"matrix": &FibCalculator{core: &MatrixExponentiation{}},
 }
 
-// main est le point d'entrée du programme. Sa seule responsabilité est de :
-// 1. Analyser les arguments de la ligne de commande.
-// 2. Configurer et appeler la fonction `run` qui contient la logique principale.
-// 3. Terminer le programme avec le code de sortie approprié.
+// main est le point d'entrée du programme.
 func main() {
-	// Configuration et analyse des arguments de la ligne de commande avec le package `flag`.
+	// Configuration des arguments de ligne de commande (CLI).
 	nFlag := flag.Uint64("n", 100000000, "L'indice 'n' de la séquence de Fibonacci à calculer.")
-	verboseFlag := flag.Bool("v", false, "Affiche le résultat complet.")
+	verboseFlag := flag.Bool("v", false, "Affiche le résultat complet (peut être très long).")
 	timeoutFlag := flag.Duration("timeout", 5*time.Minute, "Délai maximum (ex: 30s, 1m).")
-	algoFlag := flag.String("algo", "all", "Algorithme : 'fast', 'matrix', ou 'all' (par défaut) pour comparer.")
-	flag.Parse() // Analyse les arguments fournis.
+	algoFlag := flag.String("algo", "all", "Algorithme : 'fast', 'matrix', ou 'all' (comparaison).")
+	// Flag pour le réglage fin du seuil de parallélisme.
+	thresholdFlag := flag.Int("threshold", DefaultParallelThreshold, "Seuil (en bits) pour activer la multiplication parallèle. Optimisation bas niveau.")
 
-	// Création d'une structure de configuration pour passer les paramètres proprement.
+	flag.Parse()
+
 	config := AppConfig{
-		N:       *nFlag,
-		Verbose: *verboseFlag,
-		Timeout: *timeoutFlag,
-		Algo:    *algoFlag,
+		N:         *nFlag,
+		Verbose:   *verboseFlag,
+		Timeout:   *timeoutFlag,
+		Algo:      *algoFlag,
+		Threshold: *thresholdFlag,
 	}
 
-	// Appel de la fonction `run` qui contient la logique principale de l'application.
-	// `os.Stdout` est passé pour que `run` écrive sur la sortie standard.
-	// Le code de sortie de `run` est utilisé pour terminer le programme.
+	// Exécution de la logique principale et sortie avec le code approprié.
 	exitCode := run(context.Background(), config, os.Stdout)
 	os.Exit(exitCode)
 }
 
-// CalculationResult stocke le résultat d'un seul calcul, incluant la durée et
-// une potentielle erreur.
+// CalculationResult stocke le résultat d'une exécution d'algorithme.
 type CalculationResult struct {
 	Name     string
 	Result   *big.Int
@@ -751,33 +600,34 @@ type CalculationResult struct {
 	Err      error
 }
 
-// run est la fonction d'orchestration principale. Elle est responsable de :
-// 1. Mettre en place un `context` pour gérer l'annulation et les timeouts.
-// 2. Sélectionner le(s) calculateur(s) à exécuter en fonction des arguments.
-// 3. Lancer les calculs.
-// 4. Analyser et afficher les résultats.
+// run est la fonction d'orchestration principale.
 func run(ctx context.Context, config AppConfig, out io.Writer) int {
-	// Création d'un contexte qui gère deux sources d'annulation :
-	// 1. `context.WithTimeout` : Annule le contexte si le calcul dépasse `config.Timeout`.
-	// 2. `signal.NotifyContext` : Annule le contexte si l'utilisateur appuie sur
-	//    Ctrl+C (SIGINT) ou si le système envoie un signal de terminaison (SIGTERM).
-	// La première source d'annulation qui se déclenche arrête tout.
+
+	// --- Gestion Robuste du Contexte et de l'Annulation ---
+	// Mise en place d'un contexte multi-sources pour l'annulation.
+
+	// 1. Timeout : Annulation automatique après un délai.
 	ctx, cancelTimeout := context.WithTimeout(ctx, config.Timeout)
-	defer cancelTimeout() // `defer` garantit que les ressources du timeout sont libérées.
+	defer cancelTimeout() // Libération des ressources du timer.
+
+	// 2. Signaux OS : Annulation sur Ctrl+C (SIGINT) ou demande de terminaison (SIGTERM).
 	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals() // `defer` pour nettoyer l'écoute des signaux.
+	defer stopSignals() // Nettoyage de l'écoute des signaux.
 
-	fmt.Fprintf(out, "Calcul de F(%d)...\n", config.N)
-	fmt.Fprintf(out, "Nombre de cœurs CPU disponibles : %d\n", runtime.NumCPU())
-	fmt.Fprintf(out, "Timeout défini à %s.\n", config.Timeout)
+	// Affichage de la configuration initiale.
+	fmt.Fprintf(out, "--- Configuration ---\n")
+	fmt.Fprintf(out, "Calcul de F(%d).\n", config.N)
+	fmt.Fprintf(out, "Système : CPU Cores=%d | Go Runtime=%s\n", runtime.NumCPU(), runtime.Version())
+	fmt.Fprintf(out, "Paramètres : Timeout=%s | Parallel Threshold=%d bits\n", config.Timeout, config.Threshold)
 
-	// --- Sélection des calculateurs ---
+	// --- Sélection des Calculateurs ---
 	var calculatorsToRun []Calculator
 	algo := strings.ToLower(config.Algo)
 
 	if algo == "all" {
-		fmt.Fprintf(out, "Mode comparaison : Lancement de %d algorithmes en parallèle...\n", len(calculatorRegistry))
-		// Ordonner les clés du registre pour garantir un affichage stable.
+		// Mode comparaison : Exécution parallèle de tous les algorithmes.
+		fmt.Fprintf(out, "Mode : Comparaison (Exécution parallèle de %d algorithmes).\n", len(calculatorRegistry))
+		// Tri des clés pour un ordre d'affichage déterministe.
 		keys := make([]string, 0, len(calculatorRegistry))
 		for k := range calculatorRegistry {
 			keys = append(keys, k)
@@ -787,77 +637,87 @@ func run(ctx context.Context, config AppConfig, out io.Writer) int {
 			calculatorsToRun = append(calculatorsToRun, calculatorRegistry[k])
 		}
 	} else {
+		// Mode simple.
 		calculator, ok := calculatorRegistry[algo]
 		if !ok {
-			availableAlgos := make([]string, 0, len(calculatorRegistry))
-			for k := range calculatorRegistry {
-				availableAlgos = append(availableAlgos, "'"+k+"'")
-			}
-			fmt.Fprintf(out, "Erreur : algorithme '%s' inconnu. Choix possibles : %s, ou 'all'.\n",
-				config.Algo, strings.Join(availableAlgos, ", "))
+			fmt.Fprintf(out, "Erreur : algorithme '%s' inconnu.\n", config.Algo)
 			return ExitErrorGeneric
 		}
-		fmt.Fprintf(out, "Algorithme : %s\n", calculator.Name())
+		fmt.Fprintf(out, "Mode : Simple exécution.\nAlgorithme : %s\n", calculator.Name())
 		calculatorsToRun = append(calculatorsToRun, calculator)
 	}
 
-	// --- Exécution ---
+	fmt.Fprintf(out, "\n--- Exécution ---\n")
+
+	// --- Exécution et Analyse ---
 	results := executeCalculations(ctx, calculatorsToRun, config, out)
 
-	// --- Analyse et affichage des résultats ---
 	if len(results) == 1 {
+		// Analyse du résultat unique.
 		res := results[0]
-		fmt.Fprintln(out, "\n--- Résultats ---")
+		fmt.Fprintln(out, "\n--- Résultat Final ---")
 		if res.Err != nil {
 			return handleCalculationError(res.Err, res.Duration, config.Timeout, out)
 		}
 		displayResult(res.Result, config.N, res.Duration, config.Verbose, out)
 		return ExitSuccess
 	}
+
+	// Analyse des résultats de comparaison.
 	return analyzeComparisonResults(results, config, out)
 }
 
-// executeCalculations exécute un ou plusieurs calculateurs en parallèle et gère
-// l'affichage de la progression. C'est le cœur de la logique de concurrence.
+// executeCalculations orchestre l'exécution parallèle des calculateurs.
+// Concept Clé : Modèle de Concurrence "Fan-Out/Fan-In" avec pipeline de progression.
+// Cette architecture garantit une terminaison propre (Graceful Shutdown).
 func executeCalculations(ctx context.Context, calculators []Calculator, config AppConfig, out io.Writer) []CalculationResult {
 	results := make([]CalculationResult, len(calculators))
-	// On a besoin de 3 WaitGroups pour synchroniser les différentes étapes du processus :
-	// 1. calcWg: Pour attendre la fin de toutes les goroutines de calcul principales.
-	// 2. proxyWg: Pour attendre la fin des goroutines "proxy" qui relaient la progression.
-	// 3. displayWg: Pour attendre la fin de la goroutine d'affichage de la progression.
+
+	// --- Synchronisation Complexe : Gestion des Cycles de Vie des Goroutines ---
+	// 3 WaitGroups sont nécessaires pour coordonner les étapes et assurer une
+	// fermeture propre des canaux (évitant les paniques "send on closed channel").
+
+	// 1. calcWg: Attend la fin des calculs principaux.
+	// 2. proxyWg: Attend la fin des goroutines de relais de progression.
+	// 3. displayWg: Attend la fin de la goroutine d'affichage.
 	var calcWg, proxyWg, displayWg sync.WaitGroup
 
-	// Canal central qui agrège les mises à jour de progression de tous les calculs.
-	progressChan := make(chan ProgressUpdate, len(calculators)*10)
+	// Canal central d'agrégation de la progression (Fan-In).
+	progressChan := make(chan ProgressUpdate, len(calculators)*10) // Bufferisé.
+
+	// Lancement de la goroutine d'affichage (Consommateur).
 	displayWg.Add(1)
 	go displayAggregateProgress(&displayWg, progressChan, len(calculators), out)
 
+	// Lancement des goroutines de calcul (Producteurs - Fan-Out).
 	for i, calc := range calculators {
 		calcWg.Add(1)
-		// Lancement d'une goroutine par calcul.
 		go func(idx int, calculator Calculator) {
 			defer calcWg.Done()
 
-			// Chaque calcul a son propre canal de progression "proxy".
-			// Le moteur de calcul (Section 1) envoie sa progression (0.0-1.0) ici.
+			// Canal "proxy" dédié à ce calcul.
 			proxyChan := make(chan float64, 100)
 
-			// Lancement d'une goroutine "proxy" pour ce calcul.
-			// Son rôle est de lire la progression sur `proxyChan`, de l'enrichir
-			// avec l'index du calculateur, et de la relayer au canal central `progressChan`.
+			// Goroutine "Proxy" : Relais et Enrichissement.
 			proxyWg.Add(1)
 			go func() {
 				defer proxyWg.Done()
+				// La boucle `range` se termine lorsque `proxyChan` est fermé.
 				for p := range proxyChan {
-					progressChan <- ProgressUpdate{CalculatorIndex: idx, Value: p}
+					// Envoi sécurisé vers le canal central.
+					select {
+					case progressChan <- ProgressUpdate{CalculatorIndex: idx, Value: p}:
+					case <-ctx.Done(): // Sécurité si le contexte est annulé pendant l'envoi.
+						return
+					}
 				}
 			}()
 
 			startTime := time.Now()
-			res, err := calculator.Calculate(ctx, proxyChan, config.N)
-			// Une fois le calcul terminé (avec ou sans erreur), on ferme le canal proxy.
-			// Cela a pour effet de terminer la boucle `range` dans la goroutine proxy,
-			// ce qui la termine proprement.
+			// Appel du calcul principal. On passe le seuil configuré.
+			res, err := calculator.Calculate(ctx, proxyChan, config.N, config.Threshold)
+
+			// Fermeture du canal proxy. Signale la fin de la production de progression.
 			close(proxyChan)
 
 			results[idx] = CalculationResult{
@@ -869,28 +729,30 @@ func executeCalculations(ctx context.Context, calculators []Calculator, config A
 		}(i, calc)
 	}
 
-	// La séquence d'attente est cruciale pour une fermeture propre et sans data race :
-	// 1. Attendre la fin de tous les calculs (les goroutines principales).
+	// --- Séquence de Fermeture (Coordination Finale) ---
+	// L'ordre est critique pour une terminaison propre.
+
+	// 1. Attendre la fin de tous les calculs.
 	calcWg.Wait()
-	// 2. Attendre que toutes les goroutines de proxy aient fini de relayer leurs messages.
-	//    Ceci garantit qu'aucun message ne sera envoyé sur `progressChan` après sa fermeture.
+	// 2. Attendre que tous les proxys aient fini de relayer.
 	proxyWg.Wait()
-	// 3. Maintenant, et seulement maintenant, il est sûr de fermer le canal de progression central.
-	//    La fermeture de ce canal signalera à `displayAggregateProgress` de se terminer.
+	// 3. Fermer le canal central `progressChan`. C'est sûr car plus aucun producteur n'est actif.
 	close(progressChan)
-	// 4. Attendre que la goroutine d'affichage ait fini de s'imprimer une dernière fois et se termine.
+	// 4. Attendre que l'affichage soit terminé.
 	displayWg.Wait()
 
 	return results
 }
 
-// analyzeComparisonResults traite les résultats du mode "all" (comparaison).
+// analyzeComparisonResults valide l'intégrité des résultats en mode "all".
 func analyzeComparisonResults(results []CalculationResult, config AppConfig, out io.Writer) int {
-	fmt.Fprintln(out, "\n--- Résultats de la comparaison ---")
+	fmt.Fprintln(out, "\n--- Résultats de la Comparaison (Benchmark & Validation) ---")
 
 	var firstResult *big.Int
 	var firstError error
+	successCount := 0
 
+	// Affichage des statistiques individuelles.
 	for _, res := range results {
 		status := "Succès"
 		if res.Err != nil {
@@ -899,91 +761,112 @@ func analyzeComparisonResults(results []CalculationResult, config AppConfig, out
 				firstError = res.Err
 			}
 		} else {
+			successCount++
 			if firstResult == nil {
 				firstResult = res.Result
 			}
 		}
-		fmt.Fprintf(out, "  - %-55s -> Durée: %-15s | Statut: %s\n", res.Name, res.Duration.String(), status)
+		// Formatage aligné pour une meilleure lisibilité.
+		fmt.Fprintf(out, "  - %-65s | Durée: %-15s | Statut: %s\n", res.Name, res.Duration.String(), status)
 	}
 
-	if firstError != nil {
-		fmt.Fprintln(out, "\nUn ou plusieurs calculs ont échoué.")
+	// Gestion des cas d'échec global.
+	if successCount == 0 {
+		fmt.Fprintln(out, "\nStatut Global : Échec. Tous les calculs ont échoué.")
 		return handleCalculationError(firstError, 0, config.Timeout, out)
 	}
 
-	// Vérification cruciale : les résultats sont-ils identiques ?
-	for i := 1; i < len(results); i++ {
-		if results[i].Result == nil || results[i].Result.Cmp(firstResult) != 0 {
-			fmt.Fprintln(out, "\nStatut : Échec critique. Les algorithmes ont produit des résultats différents !")
-			return ExitErrorMismatch
+	// Validation de la Cohérence (Test d'intégrité critique).
+	mismatch := false
+	for _, res := range results {
+		// Comparaison des résultats valides avec le premier résultat valide.
+		// Utilisation de Cmp (0 signifie égalité).
+		if res.Err == nil && res.Result.Cmp(firstResult) != 0 {
+			mismatch = true
+			break
 		}
 	}
-	fmt.Fprintln(out, "\nValidation : Tous les résultats sont identiques.")
 
+	if mismatch {
+		fmt.Fprintln(out, "\nStatut Global : Échec Critique ! Les algorithmes ont produit des résultats différents.")
+		return ExitErrorMismatch
+	}
+
+	fmt.Fprintln(out, "\nStatut Global : Succès. Tous les résultats valides sont identiques.")
 	displayResult(firstResult, config.N, 0, config.Verbose, out)
 	return ExitSuccess
 }
 
-// handleCalculationError interprète le type d'erreur reçu et retourne le code
-// de sortie approprié, tout en affichant un message clair à l'utilisateur.
+// handleCalculationError interprète les erreurs et détermine le code de sortie.
 func handleCalculationError(err error, duration time.Duration, timeout time.Duration, out io.Writer) int {
 	msg := ""
 	if duration > 0 {
 		msg = fmt.Sprintf(" après %s", duration)
 	}
-	// `errors.Is` est la manière moderne de vérifier les types d'erreurs "enveloppées".
+
+	// Utilisation de `errors.Is` pour vérifier les erreurs de contexte (enveloppées).
+	// C'est l'idiome Go moderne pour la gestion des erreurs de contexte.
 	if errors.Is(err, context.DeadlineExceeded) {
-		fmt.Fprintf(out, "Statut : Échec. Le calcul a dépassé le délai imparti (%s)%s.\n", timeout, msg)
+		// Timeout.
+		fmt.Fprintf(out, "Statut : Échec (Timeout). Le délai imparti (%s) a été dépassé%s.\n", timeout, msg)
 		return ExitErrorTimeout
 	} else if errors.Is(err, context.Canceled) {
-		fmt.Fprintf(out, "Statut : Annulé (signal reçu ou Ctrl+C)%s.\n", msg)
+		// Annulation manuelle (Ctrl+C ou signal).
+		fmt.Fprintf(out, "Statut : Annulé (Signal reçu)%s.\n", msg)
 		return ExitErrorCanceled
 	} else {
+		// Autre erreur interne.
 		fmt.Fprintf(out, "Statut : Échec. Erreur interne : %v\n", err)
 		return ExitErrorGeneric
 	}
 }
 
-// displayResult affiche le résultat final du calcul F(n) de manière lisible.
+// displayResult formate et affiche le résultat final F(n).
 func displayResult(result *big.Int, n uint64, duration time.Duration, verbose bool, out io.Writer) {
-	fmt.Fprintln(out, "\n--- Données du résultat ---")
+	fmt.Fprintln(out, "\n--- Données du Résultat ---")
 	if duration > 0 {
+		// Affiche la durée seulement si elle provient d'un calcul unique.
 		fmt.Fprintf(out, "Durée d'exécution : %s\n", duration)
 	}
-	fmt.Fprintf(out, "Taille du résultat : %d bits.\n", result.BitLen())
-	resultStr := result.String()
-	numDigits := len(resultStr)
-	fmt.Fprintf(out, "Nombre de chiffres décimaux : %d\n", numDigits)
 
-	const truncationLimit = 50 // Seuil au-delà duquel on tronque le nombre.
-	const displayEdges = 20    // Nombre de chiffres à afficher au début et à la fin.
+	// Métadonnées sur la taille du nombre.
+	bitLen := result.BitLen()
+	fmt.Fprintf(out, "Taille Binaire : %d bits.\n", bitLen)
+
+	// Calcul du nombre de chiffres décimaux (conversion en chaîne).
+	resultStr := result.String() // Conversion en base 10.
+	numDigits := len(resultStr)
+	fmt.Fprintf(out, "Nombre de Chiffres Décimaux : %d\n", numDigits)
+
+	// Affichage du résultat (Gestion de la Troncature).
+	const truncationLimit = 80
+	const displayEdges = 20
 
 	if verbose {
-		// Le mode verbeux affiche le nombre en entier.
-		fmt.Fprintf(out, "F(%d) = %s\n", n, resultStr)
+		// Mode verbeux : Affichage complet.
+		fmt.Fprintf(out, "\nF(%d) = %s\n", n, resultStr)
 	} else if numDigits > truncationLimit {
-		// Par défaut, pour les grands nombres, on affiche le début et la fin pour
-		// donner une idée de la magnitude sans polluer le terminal.
-		fmt.Fprintf(out, "F(%d) (tronqué) = %s...%s\n", n, resultStr[:displayEdges], resultStr[numDigits-displayEdges:])
+		// Troncature pour les très grands nombres.
+		fmt.Fprintf(out, "F(%d) (Tronqué) = %s...%s\n", n, resultStr[:displayEdges], resultStr[numDigits-displayEdges:])
 	} else {
-		// Les nombres "courts" sont affichés en entier.
+		// Affichage complet pour les nombres courts.
 		fmt.Fprintf(out, "F(%d) = %s\n", n, resultStr)
 	}
 }
 
-// displayAggregateProgress est une goroutine qui gère l'affichage de la barre
-// de progression. Elle s'exécute en continu jusqu'à ce que `progressChan` soit fermé.
+// displayAggregateProgress gère l'affichage dynamique de la barre de progression.
 func displayAggregateProgress(wg *sync.WaitGroup, progressChan <-chan ProgressUpdate, numCalculators int, out io.Writer) {
 	defer wg.Done()
 	progresses := make([]float64, numCalculators)
 
-	// On utilise un `time.Ticker` pour redessiner la barre de progression à
-	// intervalles réguliers (ici, 10 fois par seconde). Cela évite de surcharger
-	// le terminal avec des mises à jour trop fréquentes.
+	// OPTIMISATION : Taux de Rafraîchissement Limité (100ms / 10Hz).
+	// Utilisation d'un `time.Ticker` pour éviter de surcharger le terminal.
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
+	// Fonction interne pour dessiner la barre de progression.
 	printBar := func() {
+		// Calcul de la progression moyenne.
 		var totalProgress float64
 		for _, p := range progresses {
 			totalProgress += p
@@ -992,44 +875,42 @@ func displayAggregateProgress(wg *sync.WaitGroup, progressChan <-chan ProgressUp
 
 		label := "Progression"
 		if numCalculators > 1 {
-			label = "Progression Globale"
+			label = "Progression Moyenne"
 		}
-		// Le caractère `\r` (retour chariot) déplace le curseur au début de la
-		// ligne sans passer à la ligne suivante. Cela permet de réécrire la
-		// même ligne à chaque mise à jour pour animer la barre de progression.
+		// Le caractère `\r` (Retour Chariot) permet de réécrire sur la même ligne.
 		fmt.Fprintf(out, "\r%s : %6.2f%% [%-30s]", label, avgProgress*100, progressBar(avgProgress, 30))
 	}
 
-	// La boucle `for` avec `select` est un idiome Go courant pour gérer plusieurs
-	// sources d'événements de manière concurrente.
+	// Boucle d'événements principale (Pattern Select).
 	for {
 		select {
-		// Cas 1: Une nouvelle mise à jour de progression est reçue.
+		// Cas 1: Réception d'une mise à jour.
 		case update, ok := <-progressChan:
-			// `ok` est faux si le canal a été fermé. C'est le signal de terminaison.
+			// Si `ok` est faux, le canal est fermé (signal de terminaison).
 			if !ok {
+				// Affichage final à 100%.
 				for i := range progresses {
-					progresses[i] = 1.0 // Force la barre à 100% pour un affichage final propre.
+					progresses[i] = 1.0
 				}
 				printBar()
 				fmt.Fprintln(out) // Passage à la ligne final.
 				return
 			}
-			// On met à jour la valeur de progression pour le calculateur concerné.
+			// Mise à jour de l'état interne.
 			if update.CalculatorIndex < len(progresses) {
 				progresses[update.CalculatorIndex] = update.Value
 			}
-		// Cas 2: Le ticker s'est déclenché.
+
+		// Cas 2: Déclenchement du Ticker.
 		case <-ticker.C:
-			// On redessine la barre de progression avec les dernières valeurs.
+			// Redessine la barre.
 			printBar()
 		}
 	}
 }
 
-// progressBar génère la chaîne de caractères représentant la barre de progression.
+// progressBar génère la représentation textuelle de la barre.
 func progressBar(progress float64, length int) string {
-	// Clamp progress to [0, 1]
 	if progress > 1.0 {
 		progress = 1.0
 	} else if progress < 0.0 {
@@ -1037,12 +918,13 @@ func progressBar(progress float64, length int) string {
 	}
 	count := int(progress * float64(length))
 	var builder strings.Builder
-	builder.Grow(length) // Pré-alloue la mémoire pour l'efficacité.
+	// Optimisation : Pré-allocation de la mémoire de la chaîne.
+	builder.Grow(length)
 	for i := 0; i < length; i++ {
 		if i < count {
-			builder.WriteRune('■') // Caractère pour la partie remplie.
+			builder.WriteRune('■') // Caractère de remplissage.
 		} else {
-			builder.WriteRune(' ') // Caractère pour la partie vide.
+			builder.WriteRune(' ')
 		}
 	}
 	return builder.String()
